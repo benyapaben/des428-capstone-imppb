@@ -1,0 +1,24 @@
+name: edemand
+services:
+  edemand:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  # docker compose run --rm test
+  # Boots its own in-memory database (see test-helpers/boot.js), so it does not need `edemand`
+  # running — no depends_on.
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    command: ["npm", "test"]
