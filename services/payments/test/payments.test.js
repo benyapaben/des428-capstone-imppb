@@ -1,0 +1,222 @@
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import {
+  boot, tokenFor, request, sendEvent, sql, createIntent, webhook, startSubscriber, config,
+} from "./helpers.js";
+import { runRelayOnce } from "../src/relay.js";
+
+const app = await boot();
+after(() => app.close());
+
+const SPARKLE = 1;
+const CUSTOMER = 1;
+const provider = tokenFor("provider", SPARKLE);
+const customer = tokenFor("customer", CUSTOMER);
+const intentBody = (order_id, amount_cents = 64200) => ({ order_id, customer_id: CUSTOMER, provider_id: SPARKLE, amount_cents });
+const count = async (text, params) => Number((await sql(text, params))[0].n);
+
+test("payments service", async (t) => {
+  await t.test("/health and /ready", async () => {
+    assert.equal((await request(app.base, "/health")).status, 200);
+    assert.equal((await request(app.base, "/ready")).status, 200);
+  });
+
+  await t.test("seed: wallets for the monolith's provider ids 1..3, all zero", async () => {
+    const rows = await sql("SELECT provider_id, balance_cents, commission_owed_cents FROM provider_wallets ORDER BY provider_id");
+    assert.deepEqual(rows, [1, 2, 3].map((id) => ({ provider_id: id, balance_cents: 0, commission_owed_cents: 0 })));
+    const res = await request(app.base, "/api/provider/wallet", { token: provider });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { provider_id: SPARKLE, balance_cents: 0, commission_owed_cents: 0, transactions: [] });
+  });
+
+  await t.test("wallet/transactions are role-gated", async () => {
+    assert.equal((await request(app.base, "/api/provider/wallet")).status, 401);
+    assert.equal((await request(app.base, "/api/provider/wallet", { token: customer })).status, 403);
+    assert.equal((await request(app.base, "/api/customer/transactions", { token: provider })).status, 403);
+  });
+
+  // ---------------- POST /intents ----------------
+  let intent;
+  await t.test("POST /intents: internal token required; Idempotency-Key must equal order_id", async () => {
+    assert.equal((await createIntent(app.base, intentBody(8001), { token: "nope" })).status, 401);
+    const badKey = await createIntent(app.base, intentBody(8001), { key: "something-else" });
+    assert.equal(badKey.status, 400);
+    const invalid = await createIntent(app.base, { order_id: 8001 });
+    assert.equal(invalid.status, 400);
+    assert.ok(Array.isArray(invalid.body.details));
+  });
+
+  await t.test("POST /intents creates one intent (201); a retry returns the same one (200)", async () => {
+    const first = await createIntent(app.base, intentBody(8001));
+    assert.equal(first.status, 201);
+    assert.equal(first.body.status, "requires_payment");
+    assert.equal(first.body.customer_id, CUSTOMER);
+    assert.match(first.body.gateway_ref, /^SIM-PI-/);
+    intent = first.body;
+
+    const retry = await createIntent(app.base, intentBody(8001));
+    assert.equal(retry.status, 200);
+    assert.equal(retry.body.gateway_ref, intent.gateway_ref);
+
+    const conflict = await createIntent(app.base, intentBody(8001, 1));
+    assert.equal(conflict.status, 409, "same key, different request");
+  });
+
+  await t.test("two concurrent POST /intents for one order -> exactly one row", async () => {
+    const [a, b] = await Promise.all([createIntent(app.base, intentBody(8100)), createIntent(app.base, intentBody(8100))]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 201]);
+    assert.equal(a.body.gateway_ref, b.body.gateway_ref);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM payment_intents WHERE order_id = 8100"), 1);
+  });
+
+  // ---------------- webhook ----------------
+  await t.test("webhook: bad secret -> 401", async () => {
+    const res = await webhook(app.base, { gateway_event_id: "evt-x", type: "payment_intent.succeeded", gateway_ref: intent.gateway_ref }, "wrong");
+    assert.equal(res.status, 401);
+  });
+
+  await t.test("webhook: unknown gateway_ref -> 404 and the event is NOT recorded (rolled back)", async () => {
+    const res = await webhook(app.base, { gateway_event_id: "evt-404", type: "payment_intent.succeeded", gateway_ref: "SIM-PI-nope" });
+    assert.equal(res.status, 404);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM webhook_events WHERE gateway_event_id = 'evt-404'"), 0);
+  });
+
+  await t.test("first webhook settles the intent, records one charge + one payment.succeeded outbox row", async () => {
+    const res = await webhook(app.base, { gateway_event_id: "evt-1", type: "payment_intent.succeeded", gateway_ref: intent.gateway_ref });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.settled, true);
+    assert.equal((await sql("SELECT status FROM payment_intents WHERE order_id = 8001"))[0].status, "succeeded");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8001 AND kind = 'charge'"), 1);
+    const [ev] = await sql("SELECT payload FROM outbox WHERE type = 'payment.succeeded' AND aggregate_id = 8001");
+    assert.deepEqual(ev.payload, {
+      order_id: 8001, customer_id: CUSTOMER, provider_id: SPARKLE, amount_cents: 64200, gateway_ref: intent.gateway_ref,
+    });
+  });
+
+  await t.test("replaying the same gateway_event_id is a 200 no-op — no double charge", async () => {
+    const res = await webhook(app.base, { gateway_event_id: "evt-1", type: "payment_intent.succeeded", gateway_ref: intent.gateway_ref });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.replayed, true);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8001 AND kind = 'charge'"), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM webhook_events WHERE gateway_event_id = 'evt-1'"), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM outbox WHERE type = 'payment.succeeded' AND aggregate_id = 8001"), 1);
+  });
+
+  await t.test("two DIFFERENT webhook events racing on one intent -> still one charge", async () => {
+    const [a, b] = await Promise.all([
+      webhook(app.base, { gateway_event_id: "evt-r1", type: "payment_intent.succeeded", gateway_ref: (await sql("SELECT gateway_ref FROM payment_intents WHERE order_id = 8100"))[0].gateway_ref }),
+      webhook(app.base, { gateway_event_id: "evt-r2", type: "payment_intent.succeeded", gateway_ref: (await sql("SELECT gateway_ref FROM payment_intents WHERE order_id = 8100"))[0].gateway_ref }),
+    ]);
+    assert.deepEqual([a.status, b.status], [200, 200]);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8100 AND kind = 'charge'"), 1);
+  });
+
+  // ---------------- simulate ----------------
+  await t.test("simulate: only the intent's customer may pay; no intent -> 409; owner settles via the webhook path", async () => {
+    await createIntent(app.base, intentBody(8002, 48150));
+    const stranger = await request(app.base, "/api/payments/simulate", { body: { order_id: 8002 }, token: tokenFor("customer", 2) });
+    assert.equal(stranger.status, 403);
+    const none = await request(app.base, "/api/payments/simulate", { body: { order_id: 9999 }, token: customer });
+    assert.equal(none.status, 409);
+    // Browser path: the gateway forwards the httpOnly cookie, not a Bearer header.
+    const ok = await request(app.base, "/api/payments/simulate", { body: { order_id: 8002 }, headers: { cookie: `edemand_token=${customer}` } });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.settled, true);
+  });
+
+  // ---------------- consuming booking.completed ----------------
+  const completed = (id, order_id, payment_method, provider_id = SPARKLE) => ({
+    source: "monolith", id, type: "booking.completed",
+    payload: {
+      order_id, total_cents: 64200, commission_cents: 9630, provider_earnings_cents: 54570,
+      customer_id: CUSTOMER, provider_id, payment_method,
+    },
+  });
+
+  await t.test("/internal/events requires the internal token", async () => {
+    assert.equal((await sendEvent(app.base, completed(1, 8001, "cod"), "nope")).status, 401);
+  });
+
+  await t.test("booking.completed (COD) books commission owed exactly once, even when redelivered", async () => {
+    const env = completed(1, 8003, "cod");
+    assert.equal((await sendEvent(app.base, env)).body.handled, true);
+    const dup = await sendEvent(app.base, env);
+    assert.equal(dup.body.duplicate, true);
+    const [w] = await sql("SELECT balance_cents, commission_owed_cents FROM provider_wallets WHERE provider_id = $1", [SPARKLE]);
+    assert.deepEqual(w, { balance_cents: 0, commission_owed_cents: 9630 });
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8003 AND kind = 'commission_owed'"), 1);
+  });
+
+  await t.test("booking.completed (gateway) credits the balance; concurrent redeliveries credit once", async () => {
+    const env = completed(2, 8001, "gateway");
+    await Promise.all([sendEvent(app.base, env), sendEvent(app.base, env), sendEvent(app.base, env)]);
+    const res = await request(app.base, "/api/provider/wallet", { token: provider });
+    assert.equal(res.body.balance_cents, 54570);
+    assert.equal(res.body.commission_owed_cents, 9630);
+    assert.equal(res.body.transactions.filter((tx) => tx.kind === "payout_credit").length, 1);
+  });
+
+  await t.test("first credit for a provider with no wallet row upserts the wallet", async () => {
+    await sendEvent(app.base, completed(3, 8004, "gateway", 77));
+    const [w] = await sql("SELECT balance_cents FROM provider_wallets WHERE provider_id = 77");
+    assert.equal(w.balance_cents, 54570);
+  });
+
+  // ---------------- consuming booking.cancelled ----------------
+  await t.test("booking.cancelled on a PAID order -> refund transaction + payment.refunded", async () => {
+    await sendEvent(app.base, { source: "monolith", id: 4, type: "booking.cancelled", payload: { order_id: 8002, payment_status: "paid" } });
+    assert.equal((await sql("SELECT status FROM payment_intents WHERE order_id = 8002"))[0].status, "refunded");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8002 AND kind = 'refund'"), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM outbox WHERE type = 'payment.refunded' AND aggregate_id = 8002"), 1);
+
+    const tx = await request(app.base, "/api/customer/transactions", { token: customer });
+    assert.equal(tx.status, 200);
+    assert.ok(tx.body.some((t) => t.order_id === 8002 && t.kind === "refund"));
+  });
+
+  await t.test("booking.cancelled on an UNPAID order voids the intent; a late webhook then charges nothing", async () => {
+    const created = await createIntent(app.base, intentBody(8005));
+    await sendEvent(app.base, { source: "monolith", id: 5, type: "booking.cancelled", payload: { order_id: 8005, payment_status: "pending" } });
+    assert.equal((await sql("SELECT status FROM payment_intents WHERE order_id = 8005"))[0].status, "canceled");
+
+    const late = await webhook(app.base, { gateway_event_id: "evt-late", type: "payment_intent.succeeded", gateway_ref: created.body.gateway_ref });
+    assert.equal(late.status, 200);
+    assert.equal(late.body.already_settled, true);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8005"), 0);
+  });
+
+  // ---------------- the outbox relay ----------------
+  await t.test("relay: subscriber down -> nothing published; back up -> every event delivered in order, once", async () => {
+    const monolith = await startSubscriber();
+    const notifications = await startSubscriber();
+    const subscribers = [monolith.url, notifications.url];
+    try {
+      monolith.state.down = true;
+      assert.equal(await runRelayOnce({ subscribers }), 0);
+      assert.ok(await count("SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL") > 0);
+
+      monolith.state.down = false;
+      const published = await runRelayOnce({ subscribers });
+      const expected = await count("SELECT COUNT(*) AS n FROM outbox");
+      assert.equal(published, expected);
+
+      for (const sub of [monolith, notifications]) {
+        const bodies = sub.received.map((r) => r.body);
+        assert.equal(bodies.length, expected);
+        assert.ok(bodies.every((b) => b.source === "payments"));
+        assert.deepEqual(bodies.map((b) => b.id), [...bodies.map((b) => b.id)].sort((a, b) => a - b));
+        assert.equal(sub.received[0].headers["x-internal-token"], config.internalToken);
+      }
+      assert.deepEqual(
+        [...new Set(monolith.received.map((r) => r.body.type))].sort(),
+        ["payment.refunded", "payment.succeeded"]
+      );
+
+      assert.equal(await runRelayOnce({ subscribers }), 0, "second pass publishes nothing");
+      assert.equal(monolith.received.length, expected, "no redelivery after publish");
+    } finally {
+      await monolith.close();
+      await notifications.close();
+    }
+  });
+});

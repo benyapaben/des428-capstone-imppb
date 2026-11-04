@@ -1,0 +1,19 @@
+{
+  "name": "edemand-notifications",
+  "version": "1.0.0",
+  "description": "Notifications service extracted from the eDemand monolith (Step 2): owns the notifications table in its own Postgres and consumes domain events.",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "jsonwebtoken": "9.0.2",
+    "pg": "8.13.1",
+    "pino": "9.4.0",
+    "zod": "3.23.8"
+  }
+}

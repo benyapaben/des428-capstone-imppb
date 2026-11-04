@@ -8,6 +8,15 @@
 process.env.NODE_ENV = "test";
 process.env.DB_PATH = ":memory:";
 
+// The extracted services are faked in-process (see fakeServices.js) — point config at the fakes.
+// Set synchronously, before the first await, like NODE_ENV above.
+process.env.PAYMENTS_URL = "http://payments.test";
+process.env.NOTIFICATIONS_URL = "http://notifications.test";
+process.env.EVENT_SUBSCRIBERS = "http://notifications.test/internal/events,http://payments.test/internal/events";
+
+const fakes = await import("./fakeServices.js");
+export const { fake, SUBSCRIBERS } = fakes;
+
 const { bootstrapDb } = await import("../lib/db/bootstrap.js");
 const { getDb, closeDb } = await import("../lib/db/index.js");
 

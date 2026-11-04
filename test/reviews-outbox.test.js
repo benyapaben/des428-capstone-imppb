@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { freshBoot, getDb } from "../test-helpers/boot.js";
+import { freshBoot, getDb, fake, SUBSCRIBERS } from "../test-helpers/boot.js";
 import { call } from "../test-helpers/call.js";
 import { loginSeededCustomer, loginSeededProvider, futureWeekday } from "../test-helpers/auth.js";
-import { runRelayOnce } from "../lib/modules/notifications/relay.js";
+import { runRelayOnce } from "../lib/outbox/relay.js";
 
 import * as bookings from "../app/api/bookings/route.js";
 import * as confirm from "../app/api/bookings/[id]/confirm/route.js";
@@ -55,8 +55,17 @@ test("reviews + outbox eventual consistency", async (t) => {
     assert.equal(svc.rating_avg, 0);
   });
 
-  await t.test("running the relay recomputes the aggregate and notifies the provider", async () => {
-    const processed = runRelayOnce();
+  await t.test("a subscriber outage leaves events unprocessed (retried later), in order", async () => {
+    fake.subscribersDown = true;
+    const processed = await runRelayOnce();
+    assert.equal(processed, 0, "nothing marked processed while a subscriber is down");
+    const pending = getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE processed_at IS NULL").get().n;
+    assert.ok(pending > 0, "events stay in the outbox");
+    fake.subscribersDown = false;
+  });
+
+  await t.test("running the relay recomputes the aggregate and delivers every event to every subscriber", async () => {
+    const processed = await runRelayOnce();
     assert.ok(processed > 0, "relay drained events");
 
     const svc = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
@@ -66,8 +75,14 @@ test("reviews + outbox eventual consistency", async (t) => {
     const prof = getDb().prepare("SELECT rating_avg, rating_count FROM provider_profiles WHERE provider_id = ?").get(provider.id);
     assert.equal(prof.rating_count, 1, "provider aggregate recomputed too");
 
-    const note = getDb().prepare("SELECT COUNT(*) AS n FROM notifications WHERE type = 'new_review' AND recipient_id = ?").get(provider.id).n;
-    assert.equal(note, 1, "provider got a new_review notification");
+    for (const url of SUBSCRIBERS) {
+      const reviews = fake.delivered.get(url).filter((e) => e.type === "review.created");
+      assert.ok(reviews.length >= 1, `${url} received review.created`);
+      assert.equal(reviews.at(-1).source, "monolith");
+      assert.equal(reviews.at(-1).payload.provider_id, provider.id);
+    }
+    const ids = fake.delivered.get(SUBSCRIBERS[0]).map((e) => e.id);
+    assert.deepEqual(ids, [...ids].sort((a, b) => a - b), "delivered in outbox order");
   });
 
   await t.test("a duplicate review -> 409", async () => {
@@ -77,11 +92,11 @@ test("reviews + outbox eventual consistency", async (t) => {
 
   await t.test("the relay is idempotent: a second pass does not double-apply", async () => {
     const before = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
-    const processed = runRelayOnce();
+    const deliveredBefore = fake.delivered.get(SUBSCRIBERS[0]).length;
+    const processed = await runRelayOnce();
     assert.equal(processed, 0, "no unprocessed events remain");
     const after = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
     assert.deepEqual(after, before, "aggregate unchanged on a second relay pass");
-    const notes = getDb().prepare("SELECT COUNT(*) AS n FROM notifications WHERE type = 'new_review' AND recipient_id = ?").get(provider.id).n;
-    assert.equal(notes, 1, "no duplicate notification");
+    assert.equal(fake.delivered.get(SUBSCRIBERS[0]).length, deliveredBefore, "nothing re-delivered");
   });
 });

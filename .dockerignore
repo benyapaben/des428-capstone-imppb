@@ -12,3 +12,6 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 README.md
+services
+gateway
+deploy

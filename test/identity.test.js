@@ -44,14 +44,11 @@ test("identity", async (t) => {
     assert.ok(Array.isArray(res.body.details));
   });
 
-  await t.test("provider register also creates provider_profiles + provider_wallets", async () => {
+  await t.test("provider register creates provider_profiles (the wallet belongs to Payments now)", async () => {
     const p = await registerProvider();
     const profile = getDb().prepare("SELECT * FROM provider_profiles WHERE provider_id = ?").get(p.id);
-    const wallet = getDb().prepare("SELECT * FROM provider_wallets WHERE provider_id = ?").get(p.id);
     assert.ok(profile, "expected a provider_profiles row");
     assert.equal(profile.is_approved, 0);
-    assert.ok(wallet, "expected a provider_wallets row");
-    assert.equal(wallet.balance_cents, 0);
     assert.equal(p.is_approved, false);
   });
 

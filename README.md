@@ -15,6 +15,67 @@ toward microservices. The bounded-context boundaries below **are** the future se
 
 ---
 
+## Step 2 — Area A: Notifications + Payments extracted, behind a gateway
+
+```
+Browser / curl ──▶ nginx gateway :8080
+                     ├─ = /api/notifications, ^~ /api/notifications/ ───────────▶ notifications svc :4001 (Express, Postgres notif_db)
+                     ├─ ^~ /api/payments/, = /api/provider/wallet,
+                     │  = /api/customer/transactions ───────────────────────────▶ payments svc :4002 (Express, Postgres pay_db + outbox)
+                     ├─ ^~ /api/internal/  → 404 (service-to-service only)
+                     └─ everything else ─────────────────────────────────────────▶ monolith :3000 (Next.js, SQLite + events outbox)
+```
+
+The gateway forwards `X-Request-Id` (minting one if absent) and `traceparent`; every service echoes
+and logs them, and the monolith passes them on when it calls Payments or renders a page that reads a
+service.
+
+**What moved**
+
+| | Before (monolith) | After |
+|---|---|---|
+| `notifications` table | SQLite | `notif_db` (notifications svc) |
+| `payment_intents` (+ new `customer_id`, `provider_id`), `transactions`, `provider_wallets`, `webhook_events` | SQLite | `pay_db` (payments svc) |
+| place gateway booking | intent inserted in the booking tx | booking tx commits, then **sync** `POST /intents` (`Idempotency-Key = order_id`); `gateway_ref` copied onto `orders`. Payments down ⇒ order cancelled again (compensation) + 503 |
+| `GET /api/bookings/:id` | read `payment_intents` | reads its own copy (`orders.gateway_ref`, `orders.payment_status`) |
+| complete booking | wallet credit inside the OTP-gated tx | OTP-gated `UPDATE` kept; emits `booking.completed`; **Payments** credits the wallet (upserting it on first credit) |
+| cancel booking | refund inserted inline | emits `booking.cancelled`; Payments refunds (→ `payment.refunded`) or voids an unpaid intent |
+| webhook | Payments wrote `orders.payment_status` | Payments emits `payment.succeeded`; **Booking** marks its own order paid |
+| provider approval | inserted a notification | writes `provider.approved` to the outbox |
+| provider register | created a wallet row | no wallet (removed `insertProviderWallet`) |
+| `/notifications`, `/provider/wallet`, `/provider/dashboard` pages | in-process service calls | HTTP to the service, cookie forwarded as `Bearer`, `cache: 'no-store'` |
+
+**Event transport (Step 2, until RabbitMQ in Step 4).** Each side keeps an outbox (`events` in
+SQLite, `outbox` in pay_db). A relay POSTs every event, in order, to each subscriber's
+`/internal/events` (monolith: `/api/internal/events`) with the shared `INTERNAL_TOKEN`, and marks it
+processed only after every subscriber answered 2xx — at-least-once. Each consumer records
+`(source, id)` in an inbox table in the same transaction as the effect, so it is applied exactly once.
+
+| Event | Producer | Consumers |
+|---|---|---|
+| `booking.status_changed`, `bid.accepted`, `review.created`, `provider.approved` | monolith | notifications (`review.created` also recomputes ratings locally) |
+| `booking.completed` | monolith | payments (wallet credit / commission owed), notifications |
+| `booking.cancelled` | monolith | payments (refund or void) |
+| `payment.succeeded`, `payment.refunded` | payments | monolith (Booking: mark paid / refunded), notifications |
+
+**Run it**
+
+```bash
+docker compose up -d --build --wait            # http://localhost:8080 — every old URL still works
+docker compose --profile test run --rm test                 # monolith suite (in-memory; services faked)
+docker compose --profile test run --rm notifications-test   # real Postgres (test-db)
+docker compose --profile test run --rm payments-test
+docker compose down -v
+```
+
+Without Docker: run Postgres locally, then `npm test` in the repo root, and
+`DATABASE_URL=postgres://… npm test` in `services/notifications` and `services/payments`.
+
+**Done-check:** `grep -rE "payment_intents|transactions|provider_wallets|webhook_events|notifications" lib/modules`
+prints nothing, and `test/schema-split.test.js` asserts those tables are gone from the SQLite schema.
+
+---
+
 ## What it is
 
 - **One deployable.** Next.js 14 App Router. UI pages are Server Components that call the service
@@ -172,10 +233,18 @@ gateways, service extraction, chat, cart, subscriptions. `SOAP`/`WSDL` appear no
 ## Tests
 
 `node --test`, no socket — the suite imports the real App Router route handlers and drives them
-in-process against per-file in-memory databases. 59 tests across:
+in-process against per-file in-memory databases; the two extracted services are faked in-process
+(`test-helpers/fakeServices.js`). 66 tests across:
 
 `health` · `identity` (auth, 401/403/400/409) · `catalog` (pagination, ownership) · `booking`
 (id 8001, the slot double-book race, idempotency, the full status machine, OTP-gated complete +
-exactly-once credit, cancel/refund, reschedule) · `slots` · `bidding` (accept race, accept-vs-withdraw)
-· `payments-webhook` (replay = single credit) · `reviews-outbox` (stale-then-relay-recomputed,
-relay idempotent) · `admin`.
+exactly-once `booking.completed`, cancel, reschedule) · `slots` · `bidding` (accept race,
+accept-vs-withdraw) · `payments-integration` (POST /intents with Idempotency-Key = order_id, the
+order's payment copy, compensation when Payments is down, inbound `payment.succeeded` /
+`payment.refunded` deduped) · `reviews-outbox` (stale-then-relay-recomputed, delivery retried on
+subscriber outage, relay idempotent) · `schema-split` · `admin`.
+
+Each service has its own suite against a real Postgres: `services/notifications` (12 tests: auth,
+cookie auth, inbox dedupe, every event → message mapping) and `services/payments` (20 tests: intent
+idempotency + race, webhook replay + race, simulate auth, exactly-once wallet credit under concurrent
+redelivery, refund/void on cancel, relay ordering + retry against a live HTTP subscriber).
