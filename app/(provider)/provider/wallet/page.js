@@ -2,17 +2,23 @@ export const dynamic = "force-dynamic";
 
 import { redirect } from "next/navigation";
 import { getSession } from "#lib/http/session.js";
-import * as payments from "#lib/modules/payments/service.js";
+import { config } from "#lib/config.js";
+import { fetchUpstream } from "#lib/http/upstream.js";
 import { money } from "../../../_ui/format.js";
 
-export default function WalletPage() {
+const EMPTY_WALLET = { balance_cents: 0, commission_owed_cents: 0, transactions: [] };
+
+// The wallet is owned by the payments service; read it over HTTP (cookie forwarded as Bearer).
+export default async function WalletPage() {
   const session = getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
-  const wallet = payments.getWallet(session.sub);
+  const res = await fetchUpstream(`${config.paymentsUrl}/api/provider/wallet`);
+  const wallet = res.ok ? res.data : EMPTY_WALLET;
 
   return (
     <div>
       <h1>Wallet</h1>
+      {!res.ok ? <div className="notice warn">Wallet data is temporarily unavailable.</div> : null}
       <div className="grid">
         <div className="card"><h3>Balance</h3><div className="price" style={{ fontSize: 24 }}>{money(wallet.balance_cents)}</div><div className="muted small">gateway earnings payable to you</div></div>
         <div className="card"><h3>Commission owed</h3><div className="price" style={{ fontSize: 24 }}>{money(wallet.commission_owed_cents)}</div><div className="muted small">COD commission you owe the platform</div></div>

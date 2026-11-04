@@ -6,5 +6,5 @@
     },
     "checkJs": false
   },
-  "exclude": ["node_modules", ".next"]
+  "exclude": ["node_modules", ".next", "services"]
 }
