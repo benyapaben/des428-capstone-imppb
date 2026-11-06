@@ -7,3 +7,9 @@ data/*.db-shm
 *.db
 npm-debug.log
 .DS_Store
+
+# Personal, machine-specific Claude Code notes (CLAUDE.md itself is shared)
+/CLAUDE.local.md
+
+# Personal task plan
+/todo.TODO
