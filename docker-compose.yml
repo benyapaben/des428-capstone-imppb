@@ -89,6 +89,31 @@ services:
       POSTGRES_PASSWORD: postgres
     healthcheck: *pg-health
 
+  # Step 3 — Area B: identity provider (realm: deploy/keycloak/edemand-realm.json, re-imported on
+  # every boot like the monolith's reseed). The issuer is pinned to http://localhost:8081 so a token
+  # fetched from inside the network (http://keycloak:8080) and one fetched from the host carry the
+  # same `iss`. JWKS for services: http://keycloak:8080/realms/edemand/protocol/openid-connect/certs
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/edemand-realm.json:/opt/keycloak/data/import/edemand-realm.json:ro
+    ports:
+      - "8081:8080"   # admin console: http://localhost:8081/admin (admin / admin)
+    healthcheck:
+      # The image has no curl/wget: talk HTTP to the management port (9000) over bash /dev/tcp.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 12
+
   # ---------------- tests ----------------
   # Boots its own in-memory database and fakes the two services (test-helpers/fakeServices.js).
   test:

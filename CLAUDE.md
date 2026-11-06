@@ -12,7 +12,8 @@ and several "monolith pains" were left in on purpose. `README.md` is the spec, n
 it before any architectural change (its "Step 2 — Area A" section documents the current split).
 
 **Migration status:** Step 2 (Area A) is **merged** — Notifications and Payments & Wallet are
-extracted behind an nginx gateway. Steps 3–6 are not started on `main`.
+extracted behind an nginx gateway. Step 3 (Area B, security) is in progress: the BOLA fix on
+`GET /api/jobs/:id` is merged and Keycloak is being added. Steps 4–6 are not started on `main`.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -92,7 +93,7 @@ so it never reaches GitHub.
 
 ### Monolith (repo root) — no Postgres, no sockets
 
-Verified with Node 20.20.2: **66/66 tests across 11 files**.
+Verified with Node 20.20.2: **73/73 tests across 12 files**.
 
 ```bash
 npm install
@@ -134,7 +135,7 @@ docker compose down -v
 
 Browse through the **gateway on :8080**. `:3000` is the monolith directly (debugging only — the
 extracted routes don't exist there). Compose services: `gateway`, `edemand`, `notifications`,
-`payments`, `notif-db`, `pay-db`, plus the `test` profile (`test`, `test-db`,
+`payments`, `notif-db`, `pay-db`, `keycloak` (:8081), plus the `test` profile (`test`, `test-db`,
 `notifications-test`, `payments-test`). `deploy/test-db-init.sql` creates `notif_test` / `pay_test`.
 
 **Always pass `--build`.** There is no source bind-mount (only `gateway/nginx.conf` is mounted):
@@ -257,6 +258,16 @@ customer#1, provider#1 and admin#1 all exist). Monolith: `lib/http/auth.js`. Ser
 `services/*/src/http.js#requireAuth` (`jsonwebtoken`, Bearer header or `edemand_token` cookie,
 `req.auth.sub` used as the owner id). Step 3 moves all three to Keycloak (RS256 via JWKS, `jose`).
 
+**Keycloak (Step 3, in progress).** Compose service `keycloak` (`quay.io/keycloak/keycloak:26.0`,
+`start-dev`) imports `deploy/keycloak/edemand-realm.json` on every boot — realm `edemand`, the 7 seed
+users (same `SEED_PASSWORD`), login client `web` (Direct Access Grant), audiences `payments-api` /
+`notifications-api`, and an evidence-only client `aud-test` that has no API audience. Access tokens
+carry `app_id` (number — the monolith DB id of *that role's* table, so compare `(role, app_id)`) and
+`role`, and live 12 h like the cookie. The issuer is pinned with `KC_HOSTNAME`, so it is
+**`http://localhost:8081/realms/edemand` everywhere**, even for tokens fetched inside the network;
+containers fetch JWKS from `http://keycloak:8080/realms/edemand/protocol/openid-connect/certs`.
+Admin console: http://localhost:8081/admin (`admin` / `admin`). Nothing verifies these tokens yet.
+
 ### Database (monolith)
 
 - One `better-sqlite3` connection, **synchronous**, cached on a `globalThis` Symbol
@@ -338,7 +349,7 @@ teaching point; do not "fix" it by updating the aggregate inline.
 
 ### Monolith
 
-`node --test test/*.test.js`, **66 tests across 11 files**, no socket. The suite **imports the real
+`node --test test/*.test.js`, **73 tests across 12 files**, no socket. The suite **imports the real
 App Router route handlers and calls them in-process**. Conventions that matter:
 
 - `test-helpers/boot.js` **must be the first import in every test file** — it sets
