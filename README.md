@@ -170,6 +170,15 @@ cross-context calls to replace with network calls. Ranked by *how cleanly it det
    deliberate answer for cross-service slot reservation. Identity is a shared dependency of everything
    and is best pulled out early as an IdP, but it has no owned business logic worth arguing about.
 
+### Seam choice for this migration
+
+We follow the ranking above: **Notifications first, then Payments & Wallet** (both done in Step 2),
+with Identity moving to an external IdP in Step 3. The course overview (`docs/README.md`) lists
+"Providers / Booking" as this case study's first seam; we deliberately did not start there, because
+Booking and Bidding share the `slot_holds` double-book guard, which turns into a distributed
+reservation problem the moment they are split (see *Known monolith pains*). Provider Profile is the
+natural next candidate (rank 3) if the team extracts a third service.
+
 ---
 
 ## The teaching hooks (all real, all tested)
