@@ -12,7 +12,8 @@ and several "monolith pains" were left in on purpose. `README.md` is the spec, n
 it before any architectural change (its "Step 2 — Area A" section documents the current split).
 
 **Migration status:** Step 2 (Area A) is **merged** — Notifications and Payments & Wallet are
-extracted behind an nginx gateway. Steps 3–6 are not started on `main`.
+extracted behind an nginx gateway. Step 3 (Area B, security) is in progress: the BOLA fix on
+`GET /api/jobs/:id` is merged and Keycloak is being added. Steps 4–6 are not started on `main`.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -92,7 +93,7 @@ so it never reaches GitHub.
 
 ### Monolith (repo root) — no Postgres, no sockets
 
-Verified with Node 20.20.2: **66/66 tests across 11 files**.
+Verified with Node 20.20.2: **73/73 tests across 12 files**.
 
 ```bash
 npm install
@@ -348,7 +349,7 @@ teaching point; do not "fix" it by updating the aggregate inline.
 
 ### Monolith
 
-`node --test test/*.test.js`, **66 tests across 11 files**, no socket. The suite **imports the real
+`node --test test/*.test.js`, **73 tests across 12 files**, no socket. The suite **imports the real
 App Router route handlers and calls them in-process**. Conventions that matter:
 
 - `test-helpers/boot.js` **must be the first import in every test file** — it sets
