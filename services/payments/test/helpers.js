@@ -4,13 +4,19 @@
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ||= "postgres://postgres:postgres@localhost:5432/pay_test";
 
+// User tokens: an in-process fake Keycloak (RS256 + a real JWKS endpoint) — see fakeKeycloak.js.
+const fakeKeycloak = await import("./fakeKeycloak.js");
+process.env.KEYCLOAK_ISSUER = fakeKeycloak.ISSUER;
+process.env.JWKS_URL = fakeKeycloak.jwksUrl;
+delete process.env.JWT_AUDIENCE; // this service's own default audience
+
 const { createApp } = await import("../src/app.js");
 const { getPool, closePool } = await import("../src/db.js");
 const { migrate, seed } = await import("../src/schema.js");
 const { config } = await import("../src/config.js");
-const jwt = (await import("jsonwebtoken")).default;
 
 export { config };
+export { tokenFor, forgedToken, expiredToken, wrongAudienceToken, hs256Token } from "./fakeKeycloak.js";
 
 export async function boot() {
   await migrate(getPool());
@@ -24,12 +30,9 @@ export async function boot() {
     async close() {
       await new Promise((r) => server.close(r));
       await closePool();
+      await fakeKeycloak.closeJwks();
     },
   };
-}
-
-export function tokenFor(role, sub) {
-  return jwt.sign({ sub, role, email: `${role}${sub}@example.com` }, config.jwtSecret, { expiresIn: "1h" });
 }
 
 export async function request(base, path, { method, body, token, headers = {} } = {}) {

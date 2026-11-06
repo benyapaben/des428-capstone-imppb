@@ -2,10 +2,14 @@
 // monolith's edemand_token cookie — the gateway forwards both), the internal-token guard, and the one
 // error handler that maps AppError to { error, requestId, details? }.
 import { randomUUID } from "node:crypto";
-import jwt from "jsonwebtoken";
+import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from "jose";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { AppError, UnauthorizedError, ForbiddenError, BadRequestError } from "./errors.js";
+
+// Keycloak's signing keys. Fetched lazily on the first token, cached, and re-fetched when a token
+// names a key id we have not seen (key rotation).
+const jwks = createRemoteJWKSet(new URL(config.jwksUrl));
 
 export function requestContext(req, res, next) {
   const incoming = req.get("x-request-id");
@@ -37,21 +41,52 @@ function readToken(req) {
 }
 
 // requireAuth() = any role; requireAuth("provider") / requireAuth(["a","b"]) = role-gated.
+// Verifies a Keycloak access token: RS256 signature against the realm's JWKS, then iss, aud and exp.
+// Any failure is 401. The token's app_id (the monolith DB id of that role's table) becomes
+// req.auth.sub, so the rest of the service keeps comparing owners as (role, sub) like before; the
+// Keycloak user id is kept as req.auth.kcSub.
+const ROLES = new Set(["customer", "provider", "admin"]);
+
 export function requireAuth(roles) {
   const allowed = roles ? (Array.isArray(roles) ? roles : [roles]) : null;
   return (req, _res, next) => {
-    const token = readToken(req);
-    if (!token) return next(new UnauthorizedError("missing bearer token"));
-    try {
-      req.auth = jwt.verify(token, config.jwtSecret);
-    } catch (err) {
-      return next(new UnauthorizedError(`invalid token: ${err.message}`));
-    }
-    if (allowed && !allowed.includes(req.auth.role)) {
-      return next(new ForbiddenError(`this route requires role: ${allowed.join(" or ")}`));
-    }
-    next();
+    authenticate(req)
+      .then(() => {
+        if (allowed && !allowed.includes(req.auth.role)) {
+          throw new ForbiddenError(`this route requires role: ${allowed.join(" or ")}`);
+        }
+        next();
+      })
+      .catch(next);
   };
+}
+
+async function authenticate(req) {
+  const token = readToken(req);
+  if (!token) throw new UnauthorizedError("missing bearer token");
+
+  let payload;
+  try {
+    ({ payload } = await jwtVerify(token, jwks, {
+      issuer: config.keycloakIssuer,
+      audience: config.jwtAudience,
+      algorithms: ["RS256"],
+    }));
+  } catch (err) {
+    // A bad token (signature, unknown key, iss/aud, expired, malformed) is the caller's problem -> 401.
+    // Not reaching Keycloak's JWKS (network error, timeout, non-200, junk body) is ours -> 503.
+    const idpProblem = !(err instanceof joseErrors.JOSEError) || err instanceof joseErrors.JWKSTimeout ||
+      err instanceof joseErrors.JWKSInvalid || err.code === "ERR_JOSE_GENERIC";
+    if (!idpProblem) {
+      throw new UnauthorizedError(`invalid token: ${err.message}`);
+    }
+    throw new AppError(503, "identity provider unreachable");
+  }
+
+  if (!ROLES.has(payload.role) || !Number.isInteger(payload.app_id) || payload.app_id <= 0) {
+    throw new UnauthorizedError("invalid token: missing app_id or role claim");
+  }
+  req.auth = { sub: payload.app_id, role: payload.role, email: payload.email, kcSub: payload.sub };
 }
 
 export function requireInternal(req, _res, next) {

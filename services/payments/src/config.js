@@ -6,8 +6,12 @@ export const config = Object.freeze({
   nodeEnv: NODE_ENV,
   port: parseInt(process.env.PORT, 10) || 4002,
   databaseUrl: process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/pay_db",
-  // Step 2: the same HS256 secret the monolith signs with. Step 3 replaces this with Keycloak's JWKS.
-  jwtSecret: process.env.JWT_SECRET || "dev secret - do not use in production",
+  // Step 3: user tokens are issued by Keycloak (RS256) and verified here against its JWKS: signature,
+  // iss, aud, exp. The issuer is the same string inside and outside docker (KC_HOSTNAME is pinned).
+  keycloakIssuer: process.env.KEYCLOAK_ISSUER || "http://localhost:8081/realms/edemand",
+  jwksUrl: process.env.JWKS_URL ||
+    `${process.env.KEYCLOAK_ISSUER || "http://localhost:8081/realms/edemand"}/protocol/openid-connect/certs`,
+  jwtAudience: process.env.JWT_AUDIENCE || "payments-api",
   internalToken: process.env.INTERNAL_TOKEN || "edemand-internal-token",
   // Shared secret the (mock) gateway signs its webhook callbacks with.
   webhookSecret: process.env.WEBHOOK_SECRET || "edemand-webhook-secret",

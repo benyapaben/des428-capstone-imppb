@@ -2,8 +2,11 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   boot, tokenFor, request, sendEvent, sql, createIntent, webhook, startSubscriber, config,
+  forgedToken, expiredToken, wrongAudienceToken, hs256Token,
 } from "./helpers.js";
-import { runRelayOnce } from "../src/relay.js";
+// Dynamic on purpose: a static import of src/ would evaluate config.js before helpers.js has set the
+// test env (JWKS_URL of the fake Keycloak), so every user token would fail with 503.
+const { runRelayOnce } = await import("../src/relay.js");
 
 const app = await boot();
 after(() => app.close());
@@ -33,6 +36,27 @@ test("payments service", async (t) => {
     assert.equal((await request(app.base, "/api/provider/wallet")).status, 401);
     assert.equal((await request(app.base, "/api/provider/wallet", { token: customer })).status, 403);
     assert.equal((await request(app.base, "/api/customer/transactions", { token: provider })).status, 403);
+  });
+
+  // Step 3: only Keycloak tokens for THIS service are accepted (signature via JWKS, iss, aud, exp).
+  await t.test("Keycloak token checks: forged, expired, wrong audience, old HS256 -> 401", async () => {
+    const get = (token) => request(app.base, "/api/provider/wallet", { token });
+    const refused = {
+      "forged signature": forgedToken("provider", SPARKLE),
+      "expired": expiredToken("provider", SPARKLE),
+      "wrong audience": wrongAudienceToken("provider", SPARKLE),
+      "only the notifications-api audience": wrongAudienceToken("provider", SPARKLE, "notifications-api"),
+      "wrong issuer": tokenFor("provider", SPARKLE, { iss: "http://evil.example/realms/edemand" }),
+      "old Step 2 HS256 token": hs256Token("provider", SPARKLE),
+      "no app_id claim": tokenFor("provider", SPARKLE, { app_id: undefined }),
+      "unknown role": tokenFor("superuser", SPARKLE),
+    };
+    for (const [why, token] of Object.entries(refused)) {
+      const res = await get(token);
+      assert.equal(res.status, 401, `${why} -> expected 401, got ${res.status}`);
+      assert.match(res.body.error, /invalid token/, why);
+    }
+    assert.equal((await get(provider)).status, 200, "a valid token still works");
   });
 
   // ---------------- POST /intents ----------------
