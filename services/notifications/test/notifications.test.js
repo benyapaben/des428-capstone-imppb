@@ -1,6 +1,8 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { boot, tokenFor, request, sendEvent } from "./helpers.js";
+import {
+  boot, tokenFor, request, sendEvent, forgedToken, expiredToken, wrongAudienceToken, hs256Token,
+} from "./helpers.js";
 
 const app = await boot();
 after(() => app.close());
@@ -29,6 +31,27 @@ test("notifications service", async (t) => {
     const res = await request(app.base, "/api/notifications", { token: provider });
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, []);
+  });
+
+  // Step 3: only Keycloak tokens for THIS service are accepted (signature via JWKS, iss, aud, exp).
+  await t.test("Keycloak token checks: forged, expired, wrong audience, old HS256 -> 401", async () => {
+    const get = (token) => request(app.base, "/api/notifications", { token });
+    const refused = {
+      "forged signature": forgedToken("provider", PROVIDER),
+      "expired": expiredToken("provider", PROVIDER),
+      "wrong audience": wrongAudienceToken("provider", PROVIDER),
+      "only the payments-api audience": wrongAudienceToken("provider", PROVIDER, "payments-api"),
+      "wrong issuer": tokenFor("provider", PROVIDER, { iss: "http://evil.example/realms/edemand" }),
+      "old Step 2 HS256 token": hs256Token("provider", PROVIDER),
+      "no app_id claim": tokenFor("provider", PROVIDER, { app_id: undefined }),
+      "unknown role": tokenFor("superuser", PROVIDER),
+    };
+    for (const [why, token] of Object.entries(refused)) {
+      const res = await get(token);
+      assert.equal(res.status, 401, `${why} -> expected 401, got ${res.status}`);
+      assert.match(res.body.error, /invalid token/, why);
+    }
+    assert.equal((await get(provider)).status, 200, "a valid token still works");
   });
 
   await t.test("/internal/events rejects a missing or wrong internal token", async () => {

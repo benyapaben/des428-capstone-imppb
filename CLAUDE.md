@@ -114,11 +114,11 @@ upstream error. Use Docker for the full system.
 
 ### Services (`services/notifications`, `services/payments`) — need Postgres
 
-Each is its own npm package (own `package.json` / lockfile, Express 4, `pg`, `jsonwebtoken`,
+Each is its own npm package (own `package.json` / lockfile, Express 4, `pg`, `jose`,
 `zod`, `pino`). Tests run against a **real Postgres** via `DATABASE_URL`, serially
 (`--test-concurrency=1`). Easiest through Docker (below); otherwise
 `cd services/<name> && npm install && DATABASE_URL=postgres://… npm test`.
-Verified 2026-11-06 in Docker: **notifications 12/12, payments 20/20**.
+Verified 2026-11-07 in Docker: **notifications 13/13, payments 21/21**.
 
 `docker compose --profile test run` starts `test-db` as a dependency and **leaves it running**
 afterwards; clean up with `docker compose --profile test rm -sf test-db`.
@@ -249,14 +249,19 @@ a new one-off client component. Styling is one hand-written `app/globals.css` wi
 Auth tokens verify identically from either `Authorization: Bearer` (API + tests) or the
 `edemand_token` cookie (browser) — see `lib/http/auth.js`.
 
-### Auth (as of Step 2 — Step 3 replaces it)
+### Auth (Step 3 in progress — services on Keycloak, monolith still HS256)
 
-All three processes verify the **same HS256 JWT** signed by the monolith with the shared
+**Monolith** (`lib/http/auth.js`): still signs and verifies its own **HS256 JWT** with the shared
 `JWT_SECRET` (`x-shared-env` in `docker-compose.yml`). Claims are `{ sub, role, email }`, where
 `sub` is the monolith DB id of that role's table (so ids are **not unique across roles** —
-customer#1, provider#1 and admin#1 all exist). Monolith: `lib/http/auth.js`. Services:
-`services/*/src/http.js#requireAuth` (`jsonwebtoken`, Bearer header or `edemand_token` cookie,
-`req.auth.sub` used as the owner id). Step 3 moves all three to Keycloak (RS256 via JWKS, `jose`).
+customer#1, provider#1 and admin#1 all exist). Step 3 / B3 moves it to Keycloak.
+
+**Services** (`services/*/src/http.js#requireAuth`): accept **only Keycloak tokens**. `jose`
+verifies the RS256 signature against the realm's JWKS (`JWKS_URL`), then `iss` (`KEYCLOAK_ISSUER`),
+`aud` (`JWT_AUDIENCE` — `payments-api` / `notifications-api`) and `exp`; any failure is **401**,
+JWKS unreachable is **503**. The token's `app_id` is normalised to **`req.auth.sub`** (Keycloak's
+own user id is `req.auth.kcSub`), so owner checks stay `(role, sub)`. Token from the Bearer header
+or the `edemand_token` cookie. Until B3 lands, a monolith HS256 token gets 401 from the services.
 
 **Keycloak (Step 3, in progress).** Compose service `keycloak` (`quay.io/keycloak/keycloak:26.0`,
 `start-dev`) imports `deploy/keycloak/edemand-realm.json` on every boot — realm `edemand`, the 7 seed
@@ -266,7 +271,8 @@ carry `app_id` (number — the monolith DB id of *that role's* table, so compare
 `role`, and live 12 h like the cookie. The issuer is pinned with `KC_HOSTNAME`, so it is
 **`http://localhost:8081/realms/edemand` everywhere**, even for tokens fetched inside the network;
 containers fetch JWKS from `http://keycloak:8080/realms/edemand/protocol/openid-connect/certs`.
-Admin console: http://localhost:8081/admin (`admin` / `admin`). Nothing verifies these tokens yet.
+Admin console: http://localhost:8081/admin (`admin` / `admin`). `payments` and `notifications`
+`depends_on` it (healthy) and get `KEYCLOAK_ISSUER` / `JWKS_URL` from `x-keycloak-env`.
 
 ### Database (monolith)
 
@@ -377,6 +383,14 @@ App Router route handlers and calls them in-process**. Conventions that matter:
 
 Each service has `test/helpers.js` + one suite, run against a real Postgres (`DATABASE_URL`),
 mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ephemeral port.
+
+- **User tokens come from `test/fakeKeycloak.js`**: an RS256 key pair whose public half is served as
+  a JWKS over real HTTP; `helpers.js` points `JWKS_URL` / `KEYCLOAK_ISSUER` at it, so `requireAuth`
+  runs its production code path. `tokenFor(role, appId)` signs Keycloak-shaped tokens (sync);
+  `forgedToken` / `expiredToken` / `wrongAudienceToken` / `hs256Token` build the ones that must 401.
+- **Never import `../src/*` statically in a test file** — ESM evaluates it (and `config.js`) before
+  `helpers.js` has set the env, and every user token then fails with 503. Import `src/` dynamically
+  after `helpers.js` (see `payments.test.js` → `runRelayOnce`).
 
 ## Gotchas
 
