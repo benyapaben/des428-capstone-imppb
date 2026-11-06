@@ -1,8 +1,11 @@
 // In-process stand-ins for the extracted services, so the monolith suite still needs no sockets.
-// Replaces globalThis.fetch: requests to the fake payments / notifications hosts are answered here,
-// anything else falls through to the real fetch. Tests flip `paymentsDown` / `subscribersDown` to
-// exercise the failure paths (compensation, relay retry).
+// Replaces globalThis.fetch: requests to the fake payments / notifications / Keycloak hosts are
+// answered here, anything else falls through to the real fetch. Tests flip `paymentsDown` /
+// `subscribersDown` / `fakeKeycloak.down` to exercise the failure paths (compensation, relay retry).
 import { randomUUID } from "node:crypto";
+import { fakeKeycloak, handleKeycloak } from "./fakeKeycloak.js";
+
+export { fakeKeycloak };
 
 export const PAYMENTS_URL = "http://payments.test";
 export const NOTIFICATIONS_URL = "http://notifications.test";
@@ -20,6 +23,7 @@ export const fake = {
     this.intents.clear();
     this.intentCalls.length = 0;
     for (const list of this.delivered.values()) list.length = 0;
+    fakeKeycloak.down = false; // its users are kept: tests rely on accounts registered earlier
   },
 };
 
@@ -32,6 +36,9 @@ function reply(status, body) {
 globalThis.fetch = async (input, init = {}) => {
   const url = typeof input === "string" ? input : input.url;
   const headers = new Headers(init.headers || {});
+
+  const keycloakReply = await handleKeycloak(url, init);
+  if (keycloakReply) return keycloakReply;
 
   if (url === `${PAYMENTS_URL}/intents`) {
     if (fake.paymentsDown) throw new TypeError("fetch failed");

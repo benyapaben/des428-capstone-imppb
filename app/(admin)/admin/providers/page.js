@@ -5,8 +5,8 @@ import { getSession } from "#lib/http/session.js";
 import * as providers from "#lib/modules/providers/service.js";
 import { ActionButton, Form } from "../../../_ui/client.js";
 
-export default function AdminProvidersPage() {
-  const session = getSession();
+export default async function AdminProvidersPage() {
+  const session = await getSession();
   if (!session || session.role !== "admin") redirect("/admin/login");
   const list = providers.listAllForAdmin();
 

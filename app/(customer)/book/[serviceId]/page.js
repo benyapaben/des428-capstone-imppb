@@ -7,8 +7,8 @@ import * as booking from "#lib/modules/booking/service.js";
 import { money } from "../../../_ui/format.js";
 import { BookingForm } from "../../../_ui/client.js";
 
-export default function BookPage({ params }) {
-  const session = getSession();
+export default async function BookPage({ params }) {
+  const session = await getSession();
   if (!session || session.role !== "customer") redirect("/login");
 
   let service;

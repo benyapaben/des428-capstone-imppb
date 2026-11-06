@@ -7,10 +7,10 @@ name: edemand
 #   docker compose --profile test run --rm payments-test        (needs test-db)
 
 x-shared-env: &shared-env
-  JWT_SECRET: ${JWT_SECRET:-dev secret - do not use in production}
   INTERNAL_TOKEN: ${INTERNAL_TOKEN:-edemand-internal-token}
 
-# Step 3: how a service verifies a user's Keycloak token (issuer pinned in the keycloak service below).
+# Step 3: how every process verifies a user's Keycloak token (issuer pinned in the keycloak service
+# below). There is no shared JWT secret any more: Keycloak alone holds the signing key.
 x-keycloak-env: &keycloak-env
   KEYCLOAK_ISSUER: http://localhost:8081/realms/edemand
   JWKS_URL: http://keycloak:8080/realms/edemand/protocol/openid-connect/certs
@@ -44,10 +44,15 @@ services:
       context: .
       target: runtime
     environment:
-      <<: *shared-env
+      <<: [*shared-env, *keycloak-env]
+      KEYCLOAK_URL: http://keycloak:8080   # login (token endpoint) + registration (admin API)
+      JWT_AUDIENCE: edemand-api
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-edemand-backend-secret}
       PAYMENTS_URL: http://payments:4002
       NOTIFICATIONS_URL: http://notifications:4001
       EVENT_SUBSCRIBERS: http://notifications:4001/internal/events,http://payments:4002/internal/events
+    depends_on:
+      keycloak: { condition: service_healthy }
     ports:
       - "3000:3000"   # direct access for debugging only — browse through the gateway on :8080
     healthcheck:

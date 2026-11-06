@@ -25,7 +25,7 @@
   "clients": [
     {
       "clientId": "web",
-      "description": "Login client for the monolith (Direct Access Grant). Tokens are valid for payments-api and notifications-api.",
+      "description": "Login client for the monolith (Direct Access Grant). Tokens are valid for edemand-api, payments-api and notifications-api.",
       "enabled": true,
       "publicClient": true,
       "protocol": "openid-connect",
@@ -59,6 +59,17 @@
             "access.token.claim": "true",
             "id.token.claim": "true",
             "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience edemand-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "edemand-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
             "introspection.token.claim": "true"
           }
         },
@@ -88,7 +99,7 @@
     },
     {
       "clientId": "aud-test",
-      "description": "Evidence only (Step 3 / B6): same claims as web but NO payments-api / notifications-api audience, so services must answer 401.",
+      "description": "Evidence only (Step 3 / B6): same claims as web but NO API audience, so the monolith and both services must answer 401.",
       "enabled": true,
       "publicClient": true,
       "protocol": "openid-connect",
@@ -128,6 +139,17 @@
       ]
     },
     {
+      "clientId": "edemand-api",
+      "description": "Audience name only (tokens for this API carry aud=edemand-api). No login flows.",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
       "clientId": "payments-api",
       "description": "Audience name only (tokens for this API carry aud=payments-api). No login flows.",
       "enabled": true,
@@ -148,9 +170,32 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "edemand-backend",
+      "description": "Server-side only: the monolith uses this service account (client_credentials) to create the Keycloak user when someone registers. Never used to log a person in.",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "edemand-backend-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false
     }
   ],
   "users": [
+    {
+      "username": "service-account-edemand-backend",
+      "enabled": true,
+      "serviceAccountClientId": "edemand-backend",
+      "clientRoles": {
+        "realm-management": [
+          "manage-users",
+          "view-users"
+        ]
+      }
+    },
     {
       "username": "admin@edemand.test",
       "email": "admin@edemand.test",

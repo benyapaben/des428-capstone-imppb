@@ -13,7 +13,8 @@ it before any architectural change (its "Step 2 — Area A" section documents th
 
 **Migration status:** Step 2 (Area A) is **merged** — Notifications and Payments & Wallet are
 extracted behind an nginx gateway. Step 3 (Area B, security) is in progress: the BOLA fix on
-`GET /api/jobs/:id` is merged and Keycloak is being added. Steps 4–6 are not started on `main`.
+`GET /api/jobs/:id` and the Keycloak realm are merged; all three processes now verify Keycloak
+tokens (B2 + B3). Steps 4–6 are not started on `main`.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -93,7 +94,7 @@ so it never reaches GitHub.
 
 ### Monolith (repo root) — no Postgres, no sockets
 
-Verified with Node 20.20.2: **73/73 tests across 12 files**.
+Verified with Node 20.20.2: **80/80 tests across 13 files**.
 
 ```bash
 npm install
@@ -213,7 +214,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, "customer");          // throws 401/403
+  const auth = await getAuth(req, "customer");    // throws 401/403 (async!)
   const input = parse(schema, await readJson(req)); // throws 400 + field details
   return json(body, { status: 201 });
 });
@@ -238,8 +239,9 @@ monolith read path) — e.g. `app/(customer)/services/[id]/page.js` imports
 `#lib/modules/catalog/service.js`. Exceptions since Step 2: `/notifications`, `/provider/wallet`
 and `/provider/dashboard` read from the extracted services via `fetchUpstream()`. Route groups
 `(customer)` / `(provider)` / `(admin)` carry the three personas. Server-side identity comes from
-`getSession()` (`lib/http/session.js`), which reads the httpOnly `edemand_token` cookie via
-`next/headers`; it is UI-only and must never be used on the API path.
+**`await getSession()`** (`lib/http/session.js`, async since Step 3 — so a page that uses it is an
+`async` Server Component), which verifies the httpOnly `edemand_token` cookie via `next/headers`;
+it is UI-only and must never be used on the API path.
 
 All **mutations** go through `fetch` to route handlers from the shared client components in
 `app/_ui/client.js` (`Form`, `ActionButton`, `BookingForm`, …). Prefer extending those over writing
@@ -249,30 +251,44 @@ a new one-off client component. Styling is one hand-written `app/globals.css` wi
 Auth tokens verify identically from either `Authorization: Bearer` (API + tests) or the
 `edemand_token` cookie (browser) — see `lib/http/auth.js`.
 
-### Auth (Step 3 in progress — services on Keycloak, monolith still HS256)
+### Auth (Step 3 — Keycloak everywhere, no HS256 anywhere)
 
-**Monolith** (`lib/http/auth.js`): still signs and verifies its own **HS256 JWT** with the shared
-`JWT_SECRET` (`x-shared-env` in `docker-compose.yml`). Claims are `{ sub, role, email }`, where
-`sub` is the monolith DB id of that role's table (so ids are **not unique across roles** —
-customer#1, provider#1 and admin#1 all exist). Step 3 / B3 moves it to Keycloak.
+Keycloak alone signs tokens (RS256); there is no shared JWT secret any more. All three processes
+verify the same way with `jose`: signature against the realm's JWKS, then `iss` (pinned, below),
+`aud` (each checks its own: monolith `edemand-api`, services `payments-api` / `notifications-api`)
+and `exp`. Bad token → **401**; Keycloak/JWKS unreachable → **503**. The token's `app_id` claim is
+normalised to **`auth.sub`** (Keycloak's own user id → `auth.kcSub`), so every owner check is still
+`(role, sub)` — ids are **not unique across roles** (customer#1, provider#1, admin#1 all exist).
 
-**Services** (`services/*/src/http.js#requireAuth`): accept **only Keycloak tokens**. `jose`
-verifies the RS256 signature against the realm's JWKS (`JWKS_URL`), then `iss` (`KEYCLOAK_ISSUER`),
-`aud` (`JWT_AUDIENCE` — `payments-api` / `notifications-api`) and `exp`; any failure is **401**,
-JWKS unreachable is **503**. The token's `app_id` is normalised to **`req.auth.sub`** (Keycloak's
-own user id is `req.auth.kcSub`), so owner checks stay `(role, sub)`. Token from the Bearer header
-or the `edemand_token` cookie. Until B3 lands, a monolith HS256 token gets 401 from the services.
+**Monolith** (`lib/http/auth.js`): **`await getAuth(req, roles)`** — async since Step 3; forgetting
+the `await` gives you a Promise, not an identity. JWKS is fetched with `fetch` by
+`lib/http/jwks.js` (cached; re-fetched on an unknown `kid`, at most every 10 s — Keycloak makes new
+keys each time it re-imports the realm) instead of jose's `createRemoteJWKSet`, which uses
+`node:http` and couldn't be faked in the socket-free suite. **Login** (`identity/service.js`) is a
+Direct Access Grant through `lib/clients/keycloak.js#passwordGrant`; the endpoint's role must match
+the token's (a provider at `/api/auth/customer/login` → 401). **Registration** inserts the monolith
+row first (its id = `app_id`), then `createUser()` via the `edemand-backend` service account; if
+Keycloak says 409 or is down, the row is **deleted again (compensation)** → 409 / 503. Keycloak's
+username is the email, so **one email = one account across all roles**. `password_hash` is still
+written (legacy NOT NULL column) but never read.
+
+**Services** (`services/*/src/http.js#requireAuth`): same rules, `jose` `createRemoteJWKSet`.
 
 **Keycloak (Step 3, in progress).** Compose service `keycloak` (`quay.io/keycloak/keycloak:26.0`,
 `start-dev`) imports `deploy/keycloak/edemand-realm.json` on every boot — realm `edemand`, the 7 seed
-users (same `SEED_PASSWORD`), login client `web` (Direct Access Grant), audiences `payments-api` /
-`notifications-api`, and an evidence-only client `aud-test` that has no API audience. Access tokens
+users (same `SEED_PASSWORD`), login client `web` (Direct Access Grant), audiences `edemand-api` /
+`payments-api` / `notifications-api`, the confidential `edemand-backend` service account
+(`manage-users`, used only by registration), and an evidence-only client `aud-test` that has no API
+audience. Access tokens
 carry `app_id` (number — the monolith DB id of *that role's* table, so compare `(role, app_id)`) and
 `role`, and live 12 h like the cookie. The issuer is pinned with `KC_HOSTNAME`, so it is
 **`http://localhost:8081/realms/edemand` everywhere**, even for tokens fetched inside the network;
 containers fetch JWKS from `http://keycloak:8080/realms/edemand/protocol/openid-connect/certs`.
-Admin console: http://localhost:8081/admin (`admin` / `admin`). `payments` and `notifications`
-`depends_on` it (healthy) and get `KEYCLOAK_ISSUER` / `JWKS_URL` from `x-keycloak-env`.
+Admin console: http://localhost:8081/admin (`admin` / `admin`). `edemand`, `payments` and
+`notifications` `depends_on` it (healthy) and get `KEYCLOAK_ISSUER` / `JWKS_URL` from
+`x-keycloak-env`; `edemand` also gets `KEYCLOAK_URL` (token + admin API) and the service-account
+secret. Users registered at runtime live only until Keycloak restarts (the realm is re-imported) —
+like the monolith's own data, nothing is durable.
 
 ### Database (monolith)
 
@@ -294,7 +310,9 @@ Admin console: http://localhost:8081/admin (`admin` / `admin`). `payments` and `
   each `order_item` at booking time.
 - `lib/config.js` is the only place that reads `process.env` (plus `db/index.js` resolving
   `DB_PATH`). Add new settings there. Step 2 added `PAYMENTS_URL`, `NOTIFICATIONS_URL`,
-  `INTERNAL_TOKEN`, `EVENT_SUBSCRIBERS`, `RELAY_INTERVAL_MS`.
+  `INTERNAL_TOKEN`, `EVENT_SUBSCRIBERS`, `RELAY_INTERVAL_MS`. Step 3 removed `JWT_SECRET` /
+  `JWT_EXPIRES_IN` and added `KEYCLOAK_URL`, `KEYCLOAK_REALM`, `KEYCLOAK_ISSUER`, `JWKS_URL`,
+  `JWT_AUDIENCE`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_SECRET`.
 
 ### Concurrency idioms — do not regress these
 
@@ -355,7 +373,7 @@ teaching point; do not "fix" it by updating the aggregate inline.
 
 ### Monolith
 
-`node --test test/*.test.js`, **73 tests across 12 files**, no socket. The suite **imports the real
+`node --test test/*.test.js`, **80 tests across 13 files**, no socket. The suite **imports the real
 App Router route handlers and calls them in-process**. Conventions that matter:
 
 - `test-helpers/boot.js` **must be the first import in every test file** — it sets
@@ -367,6 +385,11 @@ App Router route handlers and calls them in-process**. Conventions that matter:
   `/internal/events` URLs are answered locally; anything else falls through to the real fetch.
   Flip `fake.paymentsDown` / `fake.subscribersDown` to exercise compensation and relay retry;
   inspect `fake.intentCalls` / `fake.delivered`; call `fake.reset()` between scenarios.
+- **Keycloak is faked the same way** (`test-helpers/fakeKeycloak.js`, host `http://keycloak.test`):
+  token endpoint (password + client_credentials), JWKS and admin create-user, starting with the 7 seed
+  users. So `test-helpers/auth.js` logins/registrations go through the real routes unchanged.
+  `fakeKeycloak.down = true` → 503 paths; `tokenFor` / `forgedToken` / `expiredToken` /
+  `wrongAudienceToken` / `hs256Token` build tokens directly (`test/keycloak-auth.test.js`).
 - Each test *file* is its own process, so each gets an isolated `:memory:` DB. Call `freshBoot()` at
   module top level.
 - `call(handler, { token, params, query, body, secret })` from `test-helpers/call.js` builds a real

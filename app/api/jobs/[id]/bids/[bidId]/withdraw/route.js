@@ -8,7 +8,7 @@ import { parseId } from "#lib/http/validate.js";
 import * as bidding from "#lib/modules/bidding/service.js";
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   return json(bidding.withdrawBid(
     parseId(params.id, "job id"),
     parseId(params.bidId, "bid id"),

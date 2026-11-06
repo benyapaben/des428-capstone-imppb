@@ -6,8 +6,8 @@ import * as booking from "#lib/modules/booking/service.js";
 import { money, Badge } from "../../../_ui/format.js";
 import { ActionButton, ReviewForm } from "../../../_ui/client.js";
 
-export default function BookingDetailPage({ params }) {
-  const session = getSession();
+export default async function BookingDetailPage({ params }) {
+  const session = await getSession();
   if (!session) redirect("/login");
 
   let b;

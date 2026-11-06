@@ -14,7 +14,7 @@ const schema = z.object({
 });
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, ["customer", "provider"]);
+  const auth = await getAuth(req, ["customer", "provider"]);
   const input = parse(schema, await readJson(req));
   return json(booking.rescheduleBooking(parseId(params.id, "booking id"), auth, input));
 });

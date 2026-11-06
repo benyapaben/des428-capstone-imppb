@@ -15,7 +15,7 @@ const schema = z.object({
 });
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   const input = parse(schema, await readJson(req));
   const bid = bidding.placeBid(parseId(params.id, "job id"), auth.sub, input);
   return json(bid, { status: 201 });

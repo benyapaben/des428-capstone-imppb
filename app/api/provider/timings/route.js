@@ -22,12 +22,12 @@ const putSchema = z.object({
 });
 
 export const GET = handle(async (req) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   return json(providers.getTimings(auth.sub));
 });
 
 export const PUT = handle(async (req) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   const { timings } = parse(putSchema, await readJson(req));
   for (const t of timings) {
     if (t.closing_time <= t.opening_time) {

@@ -10,7 +10,7 @@ const EMPTY_WALLET = { balance_cents: 0, commission_owed_cents: 0, transactions:
 
 // The wallet is owned by the payments service; read it over HTTP (cookie forwarded as Bearer).
 export default async function WalletPage() {
-  const session = getSession();
+  const session = await getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
   const res = await fetchUpstream(`${config.paymentsUrl}/api/provider/wallet`);
   const wallet = res.ok ? res.data : EMPTY_WALLET;

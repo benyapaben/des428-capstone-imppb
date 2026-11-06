@@ -31,7 +31,7 @@ async function loadNotifications() {
 }
 
 export default async function NotificationsPage() {
-  const session = getSession();
+  const session = await getSession();
   if (!session) redirect("/login");
   const { ok, list } = await loadNotifications();
 

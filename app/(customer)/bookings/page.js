@@ -6,8 +6,8 @@ import * as booking from "#lib/modules/booking/service.js";
 import { money, Badge } from "../../_ui/format.js";
 import { Form } from "../../_ui/client.js";
 
-export default function BookingsPage() {
-  const session = getSession();
+export default async function BookingsPage() {
+  const session = await getSession();
   if (!session || session.role !== "customer") redirect("/login");
 
   const { items } = booking.listBookings({ sub: session.sub, role: "customer" }, { page: 1, size: 100 });

@@ -5,8 +5,8 @@ import { getSession } from "#lib/http/session.js";
 import * as bidding from "#lib/modules/bidding/service.js";
 import { money, Badge } from "../../_ui/format.js";
 
-export default function JobsPage() {
-  const session = getSession();
+export default async function JobsPage() {
+  const session = await getSession();
   if (!session || session.role !== "customer") redirect("/login");
 
   const jobs = bidding.listJobs({ sub: session.sub, role: "customer" });

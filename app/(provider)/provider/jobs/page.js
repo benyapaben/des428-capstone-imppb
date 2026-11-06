@@ -6,8 +6,8 @@ import * as bidding from "#lib/modules/bidding/service.js";
 import { money, Badge } from "../../../_ui/format.js";
 import { Form, ActionButton } from "../../../_ui/client.js";
 
-export default function ProviderJobsPage() {
-  const session = getSession();
+export default async function ProviderJobsPage() {
+  const session = await getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
 
   const openJobs = bidding.listJobs({ sub: session.sub, role: "provider" });

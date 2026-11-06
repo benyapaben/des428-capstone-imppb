@@ -6,8 +6,8 @@ import * as catalog from "#lib/modules/catalog/service.js";
 import { money } from "../../../_ui/format.js";
 import { Form } from "../../../_ui/client.js";
 
-export default function ProviderServicesPage() {
-  const session = getSession();
+export default async function ProviderServicesPage() {
+  const session = await getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
 
   const services = catalog.listOwnServices(session.sub);

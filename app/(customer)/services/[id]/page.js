@@ -6,7 +6,7 @@ import * as reviews from "#lib/modules/reviews/service.js";
 import { getSession } from "#lib/http/session.js";
 import { money } from "../../../_ui/format.js";
 
-export default function ServicePage({ params }) {
+export default async function ServicePage({ params }) {
   const id = Number(params.id);
   let service;
   try {
@@ -15,7 +15,7 @@ export default function ServicePage({ params }) {
     notFound();
   }
   const rev = reviews.listServiceReviews(id);
-  const session = getSession();
+  const session = await getSession();
 
   return (
     <div>

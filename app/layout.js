@@ -60,8 +60,8 @@ function Nav({ session }) {
   );
 }
 
-export default function RootLayout({ children }) {
-  const session = getSession();
+export default async function RootLayout({ children }) {
+  const session = await getSession();
   return (
     <html lang="en">
       <body>
