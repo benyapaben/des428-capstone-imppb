@@ -268,9 +268,9 @@ paths:
   /api/jobs/{id}:
     get:
       tags: [Bidding]
-      summary: 'Job + bids (owner sees all; provider sees own bid + count)'
+      summary: 'Job + bids (C: own jobs, sees all bids; P: open jobs + jobs it bid on, sees own bid + count; A: all)'
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
-      responses: { '200': { description: ok }, '404': { description: missing } }
+      responses: { '200': { description: ok }, '401': { description: no token }, '403': { description: 'not the owner (C), or a non-open job the provider never bid on (P)' }, '404': { description: missing } }
   /api/jobs/{id}/cancel:
     post: { tags: [Bidding], summary: 'open -> cancelled (C, owner)', parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ], responses: { '200': { description: ok } } }
   /api/jobs/{id}/bids:
