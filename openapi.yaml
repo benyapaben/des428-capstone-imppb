@@ -6,8 +6,9 @@ info:
     On-demand home-services marketplace (DES428 case study). One Next.js monolith: UI pages +
     App Router route handlers + one SQLite file. Eight bounded contexts. Every write that changes
     state also writes a domain event to the outbox in the same transaction; a relay drains it.
-    Auth is JWT (HS256, `{sub, role, email}`, 12h). Send `Authorization: Bearer <jwt>`; the browser
-    UI also carries an httpOnly `edemand_token` cookie that verifies the same JWT. Money is integer
+    Auth is a Keycloak access token (RS256, realm `edemand`, claims `app_id` + `role`, aud
+    `edemand-api`, 12h), obtained through the login routes. Send `Authorization: Bearer <jwt>`; the
+    browser UI also carries an httpOnly `edemand_token` cookie that verifies the same JWT. Money is integer
     cents. Errors share the shape `{error, requestId, details?}`; every response echoes `X-Request-Id`.
 servers:
   - url: http://localhost:3000
@@ -92,24 +93,24 @@ paths:
     post:
       tags: [Identity]
       security: []
-      summary: Register a customer
+      summary: Register a customer (also creates the Keycloak user; undone if that fails)
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [email, password, name], properties: { email: {type: string}, password: {type: string, minLength: 8}, name: {type: string}, phone: {type: string} } } } }
-      responses: { '201': { description: created }, '409': { description: email taken, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } } }
+      responses: { '201': { description: created }, '409': { description: 'email taken (by any role: the Keycloak username is the email)', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, '503': { description: Keycloak unreachable (nothing is kept) } }
   /api/auth/customer/login:
     post:
       tags: [Identity]
       security: []
-      summary: Log in a customer (returns token + sets edemand_token cookie)
+      summary: Log in a customer via Keycloak (Direct Access Grant; returns the Keycloak access token + sets edemand_token cookie)
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email, password], properties: { email: {type: string}, password: {type: string} } } } } }
-      responses: { '200': { description: ok }, '401': { description: bad creds } }
+      responses: { '200': { description: ok }, '401': { description: 'bad creds, or not a customer account' }, '503': { description: Keycloak unreachable } }
   /api/auth/provider/register:
-    post: { tags: [Identity], security: [], summary: Register a provider (also creates profile + wallet), responses: { '201': { description: created } } }
+    post: { tags: [Identity], security: [], summary: Register a provider (also creates the profile and the Keycloak user; undone if that fails), responses: { '201': { description: created }, '409': { description: email taken (by any role) }, '503': { description: Keycloak unreachable (nothing is kept) } } }
   /api/auth/provider/login:
-    post: { tags: [Identity], security: [], summary: Log in a provider (returns token + is_approved), responses: { '200': { description: ok } } }
+    post: { tags: [Identity], security: [], summary: Log in a provider via Keycloak (returns token + is_approved), responses: { '200': { description: ok }, '401': { description: 'bad creds, or not a provider account' }, '503': { description: Keycloak unreachable } } }
   /api/auth/admin/login:
-    post: { tags: [Identity], security: [], summary: Log in an admin, responses: { '200': { description: ok } } }
+    post: { tags: [Identity], security: [], summary: Log in an admin via Keycloak, responses: { '200': { description: ok }, '401': { description: 'bad creds, or not an admin account' }, '503': { description: Keycloak unreachable } } }
   /api/auth/logout:
     post: { tags: [Identity], summary: Clear the session cookie, responses: { '200': { description: ok } } }
   /api/me:
