@@ -5,8 +5,8 @@ import { getSession } from "#lib/http/session.js";
 import * as booking from "#lib/modules/booking/service.js";
 import { money, Badge } from "../../../_ui/format.js";
 
-export default function AdminBookingsPage() {
-  const session = getSession();
+export default async function AdminBookingsPage() {
+  const session = await getSession();
   if (!session || session.role !== "admin") redirect("/admin/login");
   const { items, total } = booking.listAllBookings({ page: 1, size: 200 });
 

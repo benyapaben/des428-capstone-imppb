@@ -19,7 +19,7 @@ const patchSchema = z.object({
 });
 
 export const PATCH = handle(async (req, { params }) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   const input = parse(patchSchema, await readJson(req));
   return json(catalog.updateOwnService(auth.sub, parseId(params.id, "service id"), input));
 });

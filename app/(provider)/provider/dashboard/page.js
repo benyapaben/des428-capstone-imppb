@@ -10,7 +10,7 @@ import { fetchUpstream } from "#lib/http/upstream.js";
 import { money, Badge } from "../../../_ui/format.js";
 
 export default async function ProviderDashboard() {
-  const session = getSession();
+  const session = await getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
 
   const profile = providers.getOwnProfile(session.sub);

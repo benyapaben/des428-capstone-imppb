@@ -14,7 +14,7 @@ const schema = z.object({
 });
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, "customer");
+  const auth = await getAuth(req, "customer");
   const input = parse(schema, await readJson(req));
   const review = reviews.createReview(parseId(params.id, "booking id"), auth.sub, input);
   return json(review, { status: 201 });

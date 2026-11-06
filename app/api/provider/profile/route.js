@@ -16,12 +16,12 @@ const patchSchema = z.object({
 });
 
 export const GET = handle(async (req) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   return json(providers.getOwnProfile(auth.sub));
 });
 
 export const PATCH = handle(async (req) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   const input = parse(patchSchema, await readJson(req));
   return json(providers.updateOwnProfile(auth.sub, input));
 });

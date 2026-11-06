@@ -11,7 +11,7 @@ import * as providers from "#lib/modules/providers/service.js";
 const schema = z.object({ commission_pct: z.coerce.number().min(0).max(100) });
 
 export const PATCH = handle(async (req, { params }) => {
-  getAuth(req, "admin");
+  await getAuth(req, "admin");
   const { commission_pct } = parse(schema, await readJson(req));
   return json(providers.setCommission(parseId(params.id, "provider id"), commission_pct));
 });

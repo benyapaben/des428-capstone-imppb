@@ -18,12 +18,12 @@ const createSchema = z.object({
 });
 
 export const GET = handle(async (req) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   return json(catalog.listOwnServices(auth.sub));
 });
 
 export const POST = handle(async (req) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   const input = parse(createSchema, await readJson(req));
   const service = catalog.createService(auth.sub, input);
   return json(service, { status: 201, headers: { Location: `/api/services/${service.id}` } });

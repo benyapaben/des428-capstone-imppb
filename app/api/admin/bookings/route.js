@@ -8,7 +8,7 @@ import { parsePagination, paginationHeaders } from "#lib/http/pagination.js";
 import * as booking from "#lib/modules/booking/service.js";
 
 export const GET = handle(async (req) => {
-  getAuth(req, "admin");
+  await getAuth(req, "admin");
   const sp = new URL(req.url).searchParams;
   const { page, size } = parsePagination(sp);
   const { items, total } = booking.listAllBookings({ status: sp.get("status") || undefined, page, size });

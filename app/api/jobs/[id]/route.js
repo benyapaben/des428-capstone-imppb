@@ -8,6 +8,6 @@ import { parseId } from "#lib/http/validate.js";
 import * as bidding from "#lib/modules/bidding/service.js";
 
 export const GET = handle(async (req, { params }) => {
-  const auth = getAuth(req);
+  const auth = await getAuth(req);
   return json(bidding.getJob(parseId(params.id, "job id"), auth));
 });

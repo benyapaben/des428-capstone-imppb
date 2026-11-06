@@ -8,6 +8,6 @@ import { parseId } from "#lib/http/validate.js";
 import * as booking from "#lib/modules/booking/service.js";
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   return json(booking.startBooking(parseId(params.id, "booking id"), auth.sub));
 });

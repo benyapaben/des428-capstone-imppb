@@ -5,8 +5,8 @@ import { getSession } from "#lib/http/session.js";
 import * as providers from "#lib/modules/providers/service.js";
 import { TimingsForm } from "../../../_ui/client.js";
 
-export default function AvailabilityPage() {
-  const session = getSession();
+export default async function AvailabilityPage() {
+  const session = await getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
   const timings = providers.getTimings(session.sub);
 

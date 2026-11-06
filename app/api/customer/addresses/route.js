@@ -19,12 +19,12 @@ const schema = z.object({
 });
 
 export const GET = handle(async (req) => {
-  const auth = getAuth(req, "customer");
+  const auth = await getAuth(req, "customer");
   return json(booking.listAddresses(auth.sub));
 });
 
 export const POST = handle(async (req) => {
-  const auth = getAuth(req, "customer");
+  const auth = await getAuth(req, "customer");
   const input = parse(schema, await readJson(req));
   return json(booking.addAddress(auth.sub, input), { status: 201 });
 });

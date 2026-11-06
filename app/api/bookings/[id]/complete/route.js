@@ -12,7 +12,7 @@ import * as booking from "#lib/modules/booking/service.js";
 const schema = z.object({ otp: z.coerce.number().int() });
 
 export const POST = handle(async (req, { params }) => {
-  const auth = getAuth(req, "provider");
+  const auth = await getAuth(req, "provider");
   const { otp } = parse(schema, await readJson(req));
   return json(booking.completeBooking(parseId(params.id, "booking id"), auth.sub, otp));
 });

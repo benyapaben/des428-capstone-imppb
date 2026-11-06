@@ -29,7 +29,7 @@ function idempotencyKeyOf(req) {
 }
 
 export const POST = handle(async (req, _ctx, requestId) => {
-  const auth = getAuth(req, "customer");
+  const auth = await getAuth(req, "customer");
   const input = parse(placeSchema, await readJson(req));
   const { statusCode, body } = await booking.placeBooking(auth.sub, input, idempotencyKeyOf(req), {
     requestId,
@@ -39,7 +39,7 @@ export const POST = handle(async (req, _ctx, requestId) => {
 });
 
 export const GET = handle(async (req) => {
-  const auth = getAuth(req, ["customer", "provider"]);
+  const auth = await getAuth(req, ["customer", "provider"]);
   const sp = new URL(req.url).searchParams;
   const { page, size } = parsePagination(sp);
   const { items, total } = booking.listBookings(auth, {

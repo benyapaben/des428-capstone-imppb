@@ -6,8 +6,8 @@ import * as bidding from "#lib/modules/bidding/service.js";
 import { money, Badge } from "../../../_ui/format.js";
 import { ActionButton } from "../../../_ui/client.js";
 
-export default function JobDetailPage({ params }) {
-  const session = getSession();
+export default async function JobDetailPage({ params }) {
+  const session = await getSession();
   if (!session) redirect("/login");
 
   let data;

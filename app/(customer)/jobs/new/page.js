@@ -5,8 +5,8 @@ import { getSession } from "#lib/http/session.js";
 import * as catalog from "#lib/modules/catalog/service.js";
 import { Form } from "../../../_ui/client.js";
 
-export default function NewJobPage() {
-  const session = getSession();
+export default async function NewJobPage() {
+  const session = await getSession();
   if (!session || session.role !== "customer") redirect("/login");
   const categories = catalog.listCategories();
 

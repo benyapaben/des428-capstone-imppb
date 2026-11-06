@@ -8,6 +8,6 @@ import { parseId } from "#lib/http/validate.js";
 import * as providers from "#lib/modules/providers/service.js";
 
 export const POST = handle(async (req, { params }) => {
-  getAuth(req, "admin");
+  await getAuth(req, "admin");
   return json(providers.approveProvider(parseId(params.id, "provider id")));
 });

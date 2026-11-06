@@ -19,14 +19,14 @@ const postSchema = z.object({
 });
 
 export const POST = handle(async (req) => {
-  const auth = getAuth(req, "customer");
+  const auth = await getAuth(req, "customer");
   const input = parse(postSchema, await readJson(req));
   const job = bidding.postJob(auth.sub, input);
   return json(job, { status: 201, headers: { Location: `/api/jobs/${job.id}` } });
 });
 
 export const GET = handle(async (req) => {
-  const auth = getAuth(req, ["customer", "provider"]);
+  const auth = await getAuth(req, ["customer", "provider"]);
   const sp = new URL(req.url).searchParams;
   const cat = sp.get("category_id");
   return json(bidding.listJobs(auth, { categoryIds: cat ? [Number(cat)] : undefined }));
