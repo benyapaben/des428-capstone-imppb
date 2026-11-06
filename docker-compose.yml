@@ -10,6 +10,11 @@ x-shared-env: &shared-env
   JWT_SECRET: ${JWT_SECRET:-dev secret - do not use in production}
   INTERNAL_TOKEN: ${INTERNAL_TOKEN:-edemand-internal-token}
 
+# Step 3: how a service verifies a user's Keycloak token (issuer pinned in the keycloak service below).
+x-keycloak-env: &keycloak-env
+  KEYCLOAK_ISSUER: http://localhost:8081/realms/edemand
+  JWKS_URL: http://keycloak:8080/realms/edemand/protocol/openid-connect/certs
+
 x-pg-health: &pg-health
   test: ["CMD-SHELL", "pg_isready -U postgres"]
   interval: 5s
@@ -57,23 +62,27 @@ services:
       context: ./services/notifications
       target: runtime
     environment:
-      <<: *shared-env
+      <<: [*shared-env, *keycloak-env]
+      JWT_AUDIENCE: notifications-api
       DATABASE_URL: postgres://postgres:postgres@notif-db:5432/notif_db
     depends_on:
       notif-db: { condition: service_healthy }
+      keycloak: { condition: service_healthy }
 
   payments:
     build:
       context: ./services/payments
       target: runtime
     environment:
-      <<: *shared-env
+      <<: [*shared-env, *keycloak-env]
+      JWT_AUDIENCE: payments-api
       DATABASE_URL: postgres://postgres:postgres@pay-db:5432/pay_db
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-edemand-webhook-secret}
       EVENT_SUBSCRIBERS: http://edemand:3000/api/internal/events,http://notifications:4001/internal/events
       SEED_PROVIDER_IDS: "1,2,3"
     depends_on:
       pay-db: { condition: service_healthy }
+      keycloak: { condition: service_healthy }
 
   notif-db:
     image: postgres:16-alpine
