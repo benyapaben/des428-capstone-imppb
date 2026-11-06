@@ -12,6 +12,6 @@ const schema = z.object({ email: z.string().email(), password: z.string().min(1)
 
 export const POST = handle(async (req) => {
   const input = parse(schema, await readJson(req));
-  const { token, is_approved } = identity.loginProvider(input);
+  const { token, is_approved } = await identity.loginProvider(input);
   return json({ token, is_approved }, { status: 200, headers: { "Set-Cookie": tokenCookie(token) } });
 });

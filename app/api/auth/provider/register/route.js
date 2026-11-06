@@ -17,7 +17,7 @@ const schema = z.object({
 
 export const POST = handle(async (req) => {
   const input = parse(schema, await readJson(req));
-  const provider = identity.registerProvider(input);
+  const provider = await identity.registerProvider(input);
   return json(
     { id: provider.id, email: provider.email, name: provider.name },
     { status: 201, headers: { Location: `/api/providers/${provider.id}` } }
