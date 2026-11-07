@@ -12,9 +12,10 @@ and several "monolith pains" were left in on purpose. `README.md` is the spec, n
 it before any architectural change (its "Step 2 — Area A" section documents the current split).
 
 **Migration status:** Step 2 (Area A) is **merged** — Notifications and Payments & Wallet are
-extracted behind an nginx gateway. Step 3 (Area B, security) is in progress: the BOLA fix on
-`GET /api/jobs/:id` and the Keycloak realm are merged; all three processes now verify Keycloak
-tokens (B2 + B3). Steps 4–6 are not started on `main`.
+extracted behind an nginx gateway. Step 3 (Area B, security) is **done**: the BOLA fix on
+`GET /api/jobs/:id`, the Keycloak realm, all three processes verifying Keycloak tokens, ownership
+tests in the services, and curl evidence — summarised in `docs/step3-security-evidence.md`.
+Steps 4–6 are not started on `main`.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -119,7 +120,7 @@ Each is its own npm package (own `package.json` / lockfile, Express 4, `pg`, `jo
 `zod`, `pino`). Tests run against a **real Postgres** via `DATABASE_URL`, serially
 (`--test-concurrency=1`). Easiest through Docker (below); otherwise
 `cd services/<name> && npm install && DATABASE_URL=postgres://… npm test`.
-Verified 2026-11-07 in Docker: **notifications 13/13, payments 21/21**.
+Verified 2026-11-07 in Docker: **notifications 14/14, payments 24/24**.
 
 `docker compose --profile test run` starts `test-db` as a dependency and **leaves it running**
 afterwards; clean up with `docker compose --profile test rm -sf test-db`.
@@ -131,8 +132,14 @@ docker compose up -d --build --wait                         # gateway on http://
 docker compose --profile test run --rm --build test                 # monolith suite (services faked)
 docker compose --profile test run --rm --build notifications-test   # real Postgres (test-db)
 docker compose --profile test run --rm --build payments-test        # real Postgres (test-db)
+bash deploy/keycloak/step3-evidence.sh   # stack must be up; real Keycloak tokens -> 200/401 table, ~70 s
 docker compose down -v
 ```
+
+`step3-evidence.sh` is the Step 3 done-when evidence (forged / expired / wrong-audience tokens → 401
+on both services, through the gateway); exit 0 = all PASS. Its recorded output and the rest of the
+Step 3 report are in `docs/step3-security-evidence.md`. `.gitattributes` keeps `*.sh` at LF so the
+script still runs from a Windows checkout.
 
 Browse through the **gateway on :8080**. `:3000` is the monolith directly (debugging only — the
 extracted routes don't exist there). Compose services: `gateway`, `edemand`, `notifications`,
@@ -274,12 +281,15 @@ written (legacy NOT NULL column) but never read.
 
 **Services** (`services/*/src/http.js#requireAuth`): same rules, `jose` `createRemoteJWKSet`.
 
-**Keycloak (Step 3, in progress).** Compose service `keycloak` (`quay.io/keycloak/keycloak:26.0`,
-`start-dev`) imports `deploy/keycloak/edemand-realm.json` on every boot — realm `edemand`, the 7 seed
+**Keycloak (Step 3).** Compose service `keycloak` (`quay.io/keycloak/keycloak:26.0`,
+`start-dev --import-realm`) imports `deploy/keycloak/edemand-realm.json` — realm `edemand`, the 7 seed
 users (same `SEED_PASSWORD`), login client `web` (Direct Access Grant), audiences `edemand-api` /
 `payments-api` / `notifications-api`, the confidential `edemand-backend` service account
-(`manage-users`, used only by registration), and an evidence-only client `aud-test` that has no API
-audience. Access tokens
+(`manage-users`, used only by registration), and two evidence-only clients: `aud-test` (no API
+audience) and `expiry-test` (same as `web`, but 60 s tokens — to show an expired real token).
+**The import only happens in a fresh container:** `docker compose restart keycloak` logs
+"Realm 'edemand' already exists. Import skipped", so after editing the realm JSON use
+`docker compose up -d --force-recreate --wait keycloak` (or `down` / `up`). Access tokens
 carry `app_id` (number — the monolith DB id of *that role's* table, so compare `(role, app_id)`) and
 `role`, and live 12 h like the cookie. The issuer is pinned with `KC_HOSTNAME`, so it is
 **`http://localhost:8081/realms/edemand` everywhere**, even for tokens fetched inside the network;
@@ -287,8 +297,11 @@ containers fetch JWKS from `http://keycloak:8080/realms/edemand/protocol/openid-
 Admin console: http://localhost:8081/admin (`admin` / `admin`). `edemand`, `payments` and
 `notifications` `depends_on` it (healthy) and get `KEYCLOAK_ISSUER` / `JWKS_URL` from
 `x-keycloak-env`; `edemand` also gets `KEYCLOAK_URL` (token + admin API) and the service-account
-secret. Users registered at runtime live only until Keycloak restarts (the realm is re-imported) —
-like the monolith's own data, nothing is durable.
+secret. Users registered at runtime live only as long as the Keycloak container (they survive a
+`restart`, not a recreate) — while the monolith's rows for them vanish on *every* monolith boot, so
+after an `edemand` restart such a Keycloak user is left with an `app_id` that no longer exists — or
+that the next registration reuses for someone else.
+Nothing is durable; recreate both together (`docker compose down` / `up`).
 
 ### Database (monolith)
 
