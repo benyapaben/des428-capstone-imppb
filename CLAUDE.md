@@ -446,9 +446,13 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   `nanoid`/`postcss`/`source-map-js`/`zod`; moderate `uuid`). The deps are pinned on purpose as the
   course baseline, and `--force` would bump `next`, `zod`, `postcss` and `uuid` across majors — zod 4
   alone would break every route's validation. Left as-is deliberately (team decision, 2026-11-02).
-- **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway is done; the
-  team still adds an external IdP (Keycloak, Step 3), a real broker (RabbitMQ) with outbox/saga/DLQ
-  (Step 4), resilience — timeouts, retries, fault switches (Step 5), and observability —
-  OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
+- **Editing `deploy/keycloak/edemand-realm.json` needs a recreated Keycloak container**, not a
+  restart: `docker compose restart keycloak` keeps the old realm ("Realm 'edemand' already exists.
+  Import skipped"). Use `docker compose up -d --force-recreate --wait keycloak` (or `down` / `up`).
+  Tell teammates in the PR — after pulling a realm change they must recreate too.
+- **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway and Step 3
+  (Keycloak, per-service JWT verification, ownership, BOLA) are done; the team still adds a real
+  broker (RabbitMQ) with outbox/saga/DLQ (Step 4), resilience — timeouts, retries, fault switches
+  (Step 5), and observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
   second-guess them; follow `docs/STEPS.md` for each step's requirements and "done when" criteria.
 - Still out of scope: real payment gateways, chat, cart, subscriptions, SOAP/WSDL.
