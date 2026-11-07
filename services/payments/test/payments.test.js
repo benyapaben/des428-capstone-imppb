@@ -36,6 +36,15 @@ test("payments service", async (t) => {
     assert.equal((await request(app.base, "/api/provider/wallet")).status, 401);
     assert.equal((await request(app.base, "/api/provider/wallet", { token: customer })).status, 403);
     assert.equal((await request(app.base, "/api/customer/transactions", { token: provider })).status, 403);
+    // app_id is not unique across roles: admin#1 shares id 1 with provider#1 but is not a provider.
+    assert.equal((await request(app.base, "/api/provider/wallet", { token: tokenFor("admin", SPARKLE) })).status, 403);
+  });
+
+  // Step 3.3: the wallet owner comes from the token's app_id only — nothing in the request can pick another one.
+  await t.test("wallet ignores any provider_id in the request", async () => {
+    const res = await request(app.base, "/api/provider/wallet?provider_id=2", { token: provider });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.provider_id, SPARKLE);
   });
 
   // Step 3: only Keycloak tokens for THIS service are accepted (signature via JWKS, iss, aud, exp).
@@ -140,6 +149,20 @@ test("payments service", async (t) => {
     await createIntent(app.base, intentBody(8002, 48150));
     const stranger = await request(app.base, "/api/payments/simulate", { body: { order_id: 8002 }, token: tokenFor("customer", 2) });
     assert.equal(stranger.status, 403);
+    // Step 3.3: ownership is (role, app_id). provider#1 / admin#1 share app_id 1 with the intent's customer#1,
+    // and a customer_id in the body cannot claim the intent either.
+    const refused = {
+      "provider#1 (same app_id)": { token: tokenFor("provider", CUSTOMER), body: { order_id: 8002 } },
+      "admin#1 (same app_id)": { token: tokenFor("admin", CUSTOMER), body: { order_id: 8002 } },
+      "customer#2 claiming customer_id 1 in the body": { token: tokenFor("customer", 2), body: { order_id: 8002, customer_id: CUSTOMER } },
+    };
+    for (const [who, { token, body }] of Object.entries(refused)) {
+      const res = await request(app.base, "/api/payments/simulate", { body, token });
+      assert.equal(res.status, 403, `${who} -> expected 403, got ${res.status}`);
+    }
+    assert.equal((await sql("SELECT status FROM payment_intents WHERE order_id = 8002"))[0].status, "requires_payment",
+      "a refused simulate settles nothing");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8002"), 0);
     const none = await request(app.base, "/api/payments/simulate", { body: { order_id: 9999 }, token: customer });
     assert.equal(none.status, 409);
     // Browser path: the gateway forwards the httpOnly cookie, not a Bearer header.
@@ -180,6 +203,12 @@ test("payments service", async (t) => {
     assert.equal(res.body.transactions.filter((tx) => tx.kind === "payout_credit").length, 1);
   });
 
+  await t.test("another provider's wallet shows none of provider#1's money", async () => {
+    const res = await request(app.base, "/api/provider/wallet", { token: tokenFor("provider", 2) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { provider_id: 2, balance_cents: 0, commission_owed_cents: 0, transactions: [] });
+  });
+
   await t.test("first credit for a provider with no wallet row upserts the wallet", async () => {
     await sendEvent(app.base, completed(3, 8004, "gateway", 77));
     const [w] = await sql("SELECT balance_cents FROM provider_wallets WHERE provider_id = 77");
@@ -196,6 +225,12 @@ test("payments service", async (t) => {
     const tx = await request(app.base, "/api/customer/transactions", { token: customer });
     assert.equal(tx.status, 200);
     assert.ok(tx.body.some((t) => t.order_id === 8002 && t.kind === "refund"));
+  });
+
+  await t.test("customer transactions are scoped to the caller", async () => {
+    const res = await request(app.base, "/api/customer/transactions", { token: tokenFor("customer", 2) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, [], "customer#2 sees none of customer#1's charges or refunds");
   });
 
   await t.test("booking.cancelled on an UNPAID order voids the intent; a late webhook then charges nothing", async () => {

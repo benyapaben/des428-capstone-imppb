@@ -306,20 +306,20 @@ paths:
       tags: [Payments & Wallet]
       summary: 'Mock gateway "Pay now" (C): drives the same idempotent webhook path'
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [order_id], properties: { order_id: { type: integer } } } } } }
-      responses: { '200': { description: ok } }
+      responses: { '200': { description: ok }, '401': { description: no or invalid token }, '403': { description: 'not a customer, or not the customer on this intent' }, '409': { description: no gateway intent for this booking } }
   /api/provider/wallet:
-    get: { tags: [Payments & Wallet], summary: 'Balance + commission owed + transactions (P)', responses: { '200': { description: ok } } }
+    get: { tags: [Payments & Wallet], summary: 'Own balance + commission owed + transactions (P); the provider id comes from the token only', responses: { '200': { description: ok }, '401': { description: no or invalid token }, '403': { description: not a provider } } }
   /api/customer/transactions:
-    get: { tags: [Payments & Wallet], summary: 'Own charges/refunds (C)', responses: { '200': { description: ok } } }
+    get: { tags: [Payments & Wallet], summary: 'Own charges/refunds (C)', responses: { '200': { description: ok }, '401': { description: no or invalid token }, '403': { description: not a customer } } }
   /api/customer/addresses:
     get: { tags: [Booking], summary: 'Own addresses (C)', responses: { '200': { description: ok } } }
     post: { tags: [Booking], summary: 'Add an address (C)', responses: { '201': { description: created } } }
 
   /api/notifications:
-    get: { tags: [Notifications], summary: 'My notifications, newest first', responses: { '200': { description: ok } } }
+    get: { tags: [Notifications], summary: 'My notifications (matched on role + id), newest first', responses: { '200': { description: ok }, '401': { description: no or invalid token } } }
   /api/notifications/{id}/read:
     post:
       tags: [Notifications]
       summary: 'Mark one read (own only)'
       parameters: [ { name: id, in: path, required: true, schema: { type: integer } } ]
-      responses: { '200': { description: ok }, '403': { description: not yours } }
+      responses: { '200': { description: ok }, '401': { description: no or invalid token }, '403': { description: 'not yours (recipient role and id must both match)' }, '404': { description: missing } }

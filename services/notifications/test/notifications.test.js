@@ -128,4 +128,33 @@ test("notifications service", async (t) => {
     assert.equal(ok.status, 200);
     assert.ok(ok.body.read_at);
   });
+
+  // Step 3.3: app_id is NOT unique across roles (customer#1, provider#1 and admin#1 all exist), so the
+  // owner check must compare the (role, app_id) pair — a matching id alone is not ownership.
+  await t.test("ownership is (role, app_id): same id in another role gets 403 and changes nothing", async () => {
+    const created = await sendEvent(app.base, { source: "monolith", id: 20, type: "provider.approved", payload: { provider_id: PROVIDER } });
+    assert.equal(created.body.created, 1);
+    const mine = (await request(app.base, "/api/notifications", { token: provider })).body;
+    const n = mine.find((x) => x.read_at === null);
+    assert.ok(n, "provider#1 has an unread notification");
+
+    const strangers = {
+      "customer#1 (same app_id)": tokenFor("customer", PROVIDER),
+      "admin#1 (same app_id)": tokenFor("admin", PROVIDER),
+      "provider#99": tokenFor("provider", 99),
+    };
+    for (const [who, token] of Object.entries(strangers)) {
+      const res = await request(app.base, `/api/notifications/${n.id}/read`, { method: "POST", token });
+      assert.equal(res.status, 403, `${who} -> expected 403, got ${res.status}`);
+    }
+
+    const unchanged = (await request(app.base, "/api/notifications", { token: provider })).body.find((x) => x.id === n.id);
+    assert.equal(unchanged.read_at, null, "a refused mark-read leaves the notification unread");
+
+    // Listing is scoped the same way: customer#1 sees none of provider#1's messages.
+    const theirs = (await request(app.base, "/api/notifications", { token: customer })).body;
+    assert.ok(theirs.length > 0, "customer#1 has messages of their own");
+    const providerIds = new Set(mine.map((x) => x.id));
+    assert.ok(theirs.every((x) => !providerIds.has(x.id)), "no provider#1 message leaks to customer#1");
+  });
 });
