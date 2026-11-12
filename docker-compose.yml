@@ -44,15 +44,17 @@ services:
       context: .
       target: runtime
     environment:
+      PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
       <<: [*shared-env, *keycloak-env]
       KEYCLOAK_URL: http://keycloak:8080   # login (token endpoint) + registration (admin API)
       JWT_AUDIENCE: edemand-api
       KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-edemand-backend-secret}
       PAYMENTS_URL: http://payments:4002
       NOTIFICATIONS_URL: http://notifications:4001
-      EVENT_SUBSCRIBERS: http://notifications:4001/internal/events,http://payments:4002/internal/events
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
     depends_on:
       keycloak: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
     ports:
       - "3000:3000"   # direct access for debugging only — browse through the gateway on :8080
     healthcheck:
@@ -70,9 +72,11 @@ services:
       <<: [*shared-env, *keycloak-env]
       JWT_AUDIENCE: notifications-api
       DATABASE_URL: postgres://postgres:postgres@notif-db:5432/notif_db
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
     depends_on:
       notif-db: { condition: service_healthy }
       keycloak: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
 
   payments:
     build:
@@ -85,9 +89,11 @@ services:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-edemand-webhook-secret}
       EVENT_SUBSCRIBERS: http://edemand:3000/api/internal/events,http://notifications:4001/internal/events
       SEED_PROVIDER_IDS: "1,2,3"
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
     depends_on:
       pay-db: { condition: service_healthy }
       keycloak: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
 
   notif-db:
     image: postgres:16-alpine
@@ -102,6 +108,17 @@ services:
       POSTGRES_DB: pay_db
       POSTGRES_PASSWORD: postgres
     healthcheck: *pg-health
+
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports: ["5672:5672", "15672:15672"]   # 15672 = web UI, guest / guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
 
   # Step 3 — Area B: identity provider (realm: deploy/keycloak/edemand-realm.json, re-imported on
   # every boot like the monolith's reseed). The issuer is pinned to http://localhost:8081 so a token

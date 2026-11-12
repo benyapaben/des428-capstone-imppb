@@ -15,6 +15,152 @@ toward microservices. The bounded-context boundaries below **are** the future se
 
 ---
 
+## Step 4 — Area C: Outbox, RabbitMQ and saga
+
+Step 2 moved events between services with an HTTP relay. Step 4 replaces that transport with
+**RabbitMQ**: every service still writes its event to its own outbox in the same transaction as the
+state change, a relay **publishes it with publisher confirms**, and every consumer reads from its own
+durable queue and applies each message **exactly once**.
+
+```
+ monolith (SQLite)            payments (pay_db)          notifications (notif_db)
+ state change + events row    state change + outbox row
+        │ relay: publish + confirm, THEN mark processed       │
+        ▼                                ▼                    │
+   ┌────────────────── RabbitMQ  exchange "edemand.events" (topic) ──────────────────┐
+   │  routing key = event type                                                       │
+   └──┬───────────────────────────┬──────────────────────────┬───────────────────────┘
+      ▼                           ▼                          ▼
+ booking.events             payments.events          notifications.events
+ (monolith consumer)        (payments consumer)      (notifications consumer)
+      │ fails 3×                  │ fails 3×                 │ fails 3×
+      ▼                           ▼                          ▼
+ booking.events.dlq         payments.events.dlq      notifications.events.dlq
+```
+
+**What changed**
+
+| | Before (Step 2, HTTP) | After (Step 4, RabbitMQ) |
+|---|---|---|
+| Relay | `POST /internal/events` to every subscriber, then mark processed | `publish` on a **confirm channel** (`persistent: true`), mark processed only after the broker confirms — at-least-once, in outbox order |
+| Delivery config | `EVENT_SUBSCRIBERS` (list of URLs) | `AMQP_URL` |
+| Consumers | HTTP handler per service | one durable queue per service, **manual ack after the DB transaction commits** |
+| Dedupe | `inbox_events` / `processed_events` keyed by `(source, event_id)` | `processed_messages(message_id PRIMARY KEY)` in all three databases, `message_id = "<source>:<event id>"` (the AMQP `messageId`) |
+| Ratings | recomputed inside the monolith's relay | recomputed by the monolith's own consumer of `review.created` |
+| Poison messages | blocked the relay / retried forever | dead-lettered once the delivery limit (`x-delivery-limit: 3`) is exceeded |
+
+The HTTP `/internal/events` endpoints still exist (service tests use them), but no relay calls them
+any more. `INTERNAL_TOKEN` is still used by the synchronous `POST /intents` call.
+
+### Topology
+
+Every process asserts the whole topology on start-up (`assertTopology` in `lib/amqp/connection.js`
+and each service's `src/amqp.js`), so a message is never published before its queue exists.
+
+| Queue | Consumer | Bound routing keys |
+|---|---|---|
+| `payments.events` | payments | `booking.completed`, `booking.cancelled` |
+| `booking.events` | monolith (Booking + Catalog/Provider rating) | `payment.succeeded`, `payment.refunded`, `review.created` |
+| `notifications.events` | notifications | `booking.status_changed`, `booking.completed`, `bid.accepted`, `review.created`, `provider.approved`, `payment.succeeded`, `payment.refunded` |
+
+All queues are **quorum queues** with `x-delivery-limit: 3` and `x-dead-letter-exchange: edemand.dlx`.
+Each has a dead-letter queue named `<queue>.dlq`, bound to the `edemand.dlx` direct exchange with the
+queue name as routing key.
+
+| Event | Producer | Effect |
+|---|---|---|
+| `booking.completed` | monolith | **Payments** credits the provider wallet (gateway) or books commission owed (COD); Notifications messages the customer |
+| `booking.cancelled` | monolith | **Payments** refunds a settled intent or voids an unpaid one; `reason` is `customer_cancelled`, `payment_unavailable`, `payment_timeout` or `late_payment` |
+| `payment.succeeded`, `payment.refunded` | payments | **Booking** flips `orders.payment_status`; Notifications messages the customer |
+| `review.created` | monolith | the monolith consumer recomputes the service and provider rating aggregates; Notifications messages the provider |
+| `booking.status_changed`, `bid.accepted`, `provider.approved` | monolith | Notifications |
+
+### Relay and consumers
+
+- **Relay** (`lib/outbox/relay.js`, `services/payments/src/relay.js`): reads unprocessed outbox rows in
+  id order, publishes each and waits for the broker's confirm, then marks it processed. The first
+  failure stops the pass, so order is preserved and nothing is marked sent that the broker did not
+  accept. If RabbitMQ is down, requests still succeed and events wait in the outbox.
+- **Consumer** (`startConsumer` in each `amqp.js`): `prefetch(10)`, manual ack. The handler runs one
+  transaction that inserts the `processed_messages` row **and** applies the effect; a duplicate hits the
+  primary key, is a no-op and is acked. Any thrown error is a `nack` with requeue; once the delivery limit
+  is exceeded the broker moves the message to the `.dlq`. (The evidence script and
+  `docs/step4-evidence.md` record the observed number of attempts.) The consumer reconnects every 2 seconds if the connection drops.
+
+### Saga (Booking orchestrates)
+
+| Step | Action | Compensation | Status |
+|---|---|---|---|
+| 1 | Create the order and `slot_holds` (one transaction) | cancel the order, release the slots | done |
+| 2 | Payments `POST /intents` (sync, `Idempotency-Key = order_id`) | Payments down ⇒ order cancelled, slots released, 503 | done |
+| 3 | `payment.succeeded` marks the order paid | `booking.cancelled` makes Payments refund or void | done |
+| timeout | not paid within `PAYMENT_TIMEOUT_SECONDS` (default 900) ⇒ the sweeper (`lib/outbox/saga.js`, every `SWEEP_INTERVAL_MS`) cancels the order, releases the slots and emits `booking.cancelled` (`reason: payment_timeout`) so Payments voids the intent | cancel + release slots | done |
+| late payment | `payment.succeeded` arrives after the order was cancelled ⇒ Booking records it as paid and emits `booking.cancelled` (`reason: late_payment`); Payments' conditional refund then emits `payment.refunded` and the order ends `refunded` | automatic refund | done |
+
+The timeout only fires while `payment_status = 'pending'`, and the guard re-reads the order inside the
+write lock, so a payment that lands first always wins over the timeout. Payments' refund and void
+transitions are conditional, so a repeated `booking.cancelled` is harmless.
+
+### Run it
+
+```bash
+docker compose up -d --build --wait      # now also starts RabbitMQ
+# RabbitMQ management UI: http://localhost:15672   (guest / guest)
+npm test                                 # monolith suite: in-memory DB, fake broker, no sockets
+docker compose --profile test run --rm --build payments-test
+docker compose --profile test run --rm --build notifications-test
+docker compose down -v
+```
+
+**Configuration**
+
+| Variable | Where | Default | Meaning |
+|---|---|---|---|
+| `AMQP_URL` | monolith, payments, notifications | `amqp://guest:guest@localhost:5672` (`…@rabbitmq:5672` in compose) | RabbitMQ connection |
+| `PAYMENT_TIMEOUT_SECONDS` | monolith | `900` | unpaid gateway bookings are cancelled after this long |
+| `SWEEP_INTERVAL_MS` | monolith | `5000` | how often the saga sweeper looks for expired bookings |
+| `RELAY_INTERVAL_MS` | monolith, payments | `1000` | how often each relay publishes pending outbox rows |
+
+**Evidence script** (topology, event flow, broker outage, poison message → DLQ, saga timeout; exit 0 =
+all PASS):
+
+```bash
+PAYMENT_TIMEOUT_SECONDS=30 docker compose up -d --build --wait
+PAYMENT_TIMEOUT_SECONDS=30 bash deploy/rabbitmq/step4-evidence.sh     # ~2-3 minutes
+```
+
+`SKIP_OUTAGE=1` skips the stop/start-RabbitMQ case; the timeout case is skipped unless the stack was
+started with a short `PAYMENT_TIMEOUT_SECONDS`.
+
+**Try it: events survive a broker outage**
+
+```bash
+docker compose stop rabbitmq        # book a service at http://localhost:8080 — it still succeeds
+docker compose start rabbitmq       # within seconds the queued events are published and consumed
+```
+
+In the management UI the **Ready** count of each queue returns to 0 once its consumer has applied the
+messages.
+
+### Tests added or changed in Step 4
+
+- `test-helpers/fakeServices.js` provides `fakeBroker`: an in-memory stand-in whose `channel.publish`
+  has the same signature as amqplib's confirm channel (so the real relay and `publish()` run
+  unchanged) and a `consume()` that simulates ack / nack / redelivery / dead-lettering.
+- `test/reviews-outbox.test.js`: a broker outage leaves events in the outbox; the relay publishes but the
+  rating stays stale until the **consumer** runs; a redelivered `review.created` is a no-op; a second
+  relay pass publishes nothing.
+- `test/saga.test.js`: an unpaid gateway booking is cancelled after the timeout (slots released,
+  `booking.cancelled` with `reason: payment_timeout`, the slot can be booked again); a paid booking is
+  never expired; a late `payment.succeeded` after a cancel is recorded as paid, triggers a second
+  `booking.cancelled` (`late_payment`), is a no-op when redelivered, and ends `refunded`.
+- `services/payments/test/payments.test.js`: relay publishes in order, once, with
+  `messageId = "payments:<id>"`, and publishes nothing while the broker is down.
+- The existing duplicate and race tests for the wallet credit (`booking.completed` delivered more than
+  once, even concurrently) keep covering exactly-once effects in Payments.
+
+---
+
 ## Step 2 — Area A: Notifications + Payments extracted, behind a gateway
 
 ```
@@ -45,7 +191,7 @@ service.
 | provider register | created a wallet row | no wallet (removed `insertProviderWallet`) |
 | `/notifications`, `/provider/wallet`, `/provider/dashboard` pages | in-process service calls | HTTP to the service, cookie forwarded as `Bearer`, `cache: 'no-store'` |
 
-**Event transport (Step 2, until RabbitMQ in Step 4).** Each side keeps an outbox (`events` in
+**Event transport in Step 2 (superseded by RabbitMQ — see Step 4 above).** Each side keeps an outbox (`events` in
 SQLite, `outbox` in pay_db). A relay POSTs every event, in order, to each subscriber's
 `/internal/events` (monolith: `/api/internal/events`) with the shared `INTERNAL_TOKEN`, and marks it
 processed only after every subscriber answered 2xx — at-least-once. Each consumer records
@@ -53,7 +199,7 @@ processed only after every subscriber answered 2xx — at-least-once. Each consu
 
 | Event | Producer | Consumers |
 |---|---|---|
-| `booking.status_changed`, `bid.accepted`, `review.created`, `provider.approved` | monolith | notifications (`review.created` also recomputes ratings locally) |
+| `booking.status_changed`, `bid.accepted`, `review.created`, `provider.approved` | monolith | notifications (`review.created` is also consumed by the monolith itself to recompute ratings) |
 | `booking.completed` | monolith | payments (wallet credit / commission owed), notifications |
 | `booking.cancelled` | monolith | payments (refund or void) |
 | `payment.succeeded`, `payment.refunded` | payments | monolith (Booking: mark paid / refunded), notifications |
@@ -119,7 +265,7 @@ tables through its own repository; it goes through the owning context's service/
 | # | Context | Owns (tables) | Responsibility |
 |---|---------|---------------|----------------|
 | 1 | **Identity** | `customers`, `providers`, `admins` | Registration, login (bcrypt), JWT issuance, `/me`. |
-| 2 | **Catalog** | `categories`, `services` | Provider-owned services, browse/search, rating aggregate (recomputed by the relay). |
+| 2 | **Catalog** | `categories`, `services` | Provider-owned services, browse/search, rating aggregate (recomputed by a `review.created` consumer). |
 | 3 | **Provider Profile** | `provider_profiles`, `provider_timings` | Approval, commission, 30-min weekly availability. |
 | 4 | **Booking** | `orders`, `order_items`, `slot_holds`, `addresses` | The place-booking transaction, the status machine, OTP-gated completion, slots. |
 | 5 | **Bidding** | `job_requests`, `bids` | Custom jobs + provider bids; the bid-accept race that spins up a booking. |
@@ -159,7 +305,7 @@ cross-context calls to replace with network calls. Ranked by *how cleanly it det
    cross-context write becomes a `booking.mark_paid` call or a `payment.succeeded` event Booking
    subscribes to. Clear seam, one wire to cut.
 3. **Catalog / Provider Profile (extract together).** Read-heavy, mostly independent. The catch is
-   the rating aggregate on `services`/`provider_profiles` is recomputed by the **relay** on
+   the rating aggregate on `services`/`provider_profiles` is recomputed by a **consumer** of
    `review.created` — so extraction means Catalog subscribes to that event instead of sharing the
    table. The outbox already models this dependency, which is the point.
 4. **Booking + Bidding (extract last / together).** The hardest, because they share the physical
@@ -205,12 +351,14 @@ Each is a genuine mechanism, not a stub, and each has a test proving it.
   `gateway_event_id` is the dedupe key (`webhook_events.gateway_event_id UNIQUE`). A replayed callback
   short-circuits and credits nothing twice. (Contrast: the real product has no idempotency and
   double-processes retries.)
-- **Outbox + relay** (`db/events.js`, `notifications/relay.js`). Every state change writes an `events`
+- **Outbox + relay** (`db/events.js`, `outbox/relay.js`). Every state change writes an `events`
   row **in the same transaction**. A relay drains it (`setInterval` in `instrumentation.js`, or
-  `runRelayOnce()` in tests), claiming each event via `processed_at` so it applies **exactly once**.
-- **Eventual consistency of ratings.** The service/provider rating aggregate is recomputed **in the
-  relay**, driven by `review.created` — *not inline* in the review handler. So a fresh review leaves
-  the aggregate momentarily stale until the relay runs. This is the deliberate contrast with Ride
+  `runRelayOnce()` in tests): it **publishes to RabbitMQ and waits for the confirm, then** sets
+  `processed_at`, so delivery is at-least-once. Consumers dedupe on `processed_messages`, so the
+  effect is applied **exactly once**.
+- **Eventual consistency of ratings.** The service/provider rating aggregate is recomputed **by the
+  monolith's consumer of `review.created`** — *not inline* in the review handler. So a fresh review
+  leaves the aggregate momentarily stale until the event has been published and consumed. This is the deliberate contrast with Ride
   (which updates the aggregate inline) and the whole reason the outbox exists here.
 - **Idempotency-Key** (`db/idempotency.js`). `POST /api/bookings` replays the stored `{status, body}`
   for a repeated key; the `idempotency_keys.key` PRIMARY KEY makes two racing writes on one key
@@ -223,9 +371,9 @@ Each is a genuine mechanism, not a stub, and each has a test proving it.
 - **One database, shared by all eight contexts.** Cross-context writes are just function calls
   (Payments writes `orders.payment_status`; the relay writes `services.rating_avg`). Cheap and atomic
   now; each one becomes a network call + a consistency decision after extraction.
-- **The relay is in-process.** `setInterval(runRelayOnce, 1000)` shares the connection and dies with
-  the process. Real deployments need a durable broker + at-least-once delivery + a dead-letter path.
-  The `events` table + `processed_at` claim is the seam that makes swapping it in mechanical.
+- **The relay is still in-process.** `setInterval(runRelayOnce, 1000)` dies with its process. Step 4
+  added the durable broker, publish-then-mark at-least-once delivery, idempotent consumers and a
+  dead-letter path, so a crash now only delays events; it no longer loses them.
 - **Shared deploy + blast radius.** A migration, a slow query, or a crash in any context stops all of
   them. There is no independent scaling: the read-heavy Catalog scales with the write-heavy Booking.
 - **`slot_holds` is a single-DB invariant.** The strongest coupling. It is free in one SQLite file and
@@ -242,18 +390,18 @@ gateways, service extraction, chat, cart, subscriptions. `SOAP`/`WSDL` appear no
 ## Tests
 
 `node --test`, no socket — the suite imports the real App Router route handlers and drives them
-in-process against per-file in-memory databases; the two extracted services are faked in-process
-(`test-helpers/fakeServices.js`). 66 tests across:
+in-process against per-file in-memory databases; the two extracted services and RabbitMQ are faked
+in-process (`test-helpers/fakeServices.js`, including `fakeBroker`). Test files:
 
 `health` · `identity` (auth, 401/403/400/409) · `catalog` (pagination, ownership) · `booking`
 (id 8001, the slot double-book race, idempotency, the full status machine, OTP-gated complete +
 exactly-once `booking.completed`, cancel, reschedule) · `slots` · `bidding` (accept race,
 accept-vs-withdraw) · `payments-integration` (POST /intents with Idempotency-Key = order_id, the
 order's payment copy, compensation when Payments is down, inbound `payment.succeeded` /
-`payment.refunded` deduped) · `reviews-outbox` (stale-then-relay-recomputed, delivery retried on
-subscriber outage, relay idempotent) · `schema-split` · `admin`.
+`payment.refunded` deduped) · `reviews-outbox` (stale-then-consumer-recomputed, publish retried after a
+broker outage, relay idempotent, duplicate delivery is a no-op) · `schema-split` · `admin`.
 
 Each service has its own suite against a real Postgres: `services/notifications` (12 tests: auth,
 cookie auth, inbox dedupe, every event → message mapping) and `services/payments` (20 tests: intent
 idempotency + race, webhook replay + race, simulate auth, exactly-once wallet credit under concurrent
-redelivery, refund/void on cancel, relay ordering + retry against a live HTTP subscriber).
+redelivery, refund/void on cancel, relay ordering + retry against a fake broker channel).

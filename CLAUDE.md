@@ -15,7 +15,11 @@ it before any architectural change (its "Step 2 — Area A" section documents th
 extracted behind an nginx gateway. Step 3 (Area B, security) is **done**: the BOLA fix on
 `GET /api/jobs/:id`, the Keycloak realm, all three processes verifying Keycloak tokens, ownership
 tests in the services, and curl evidence — summarised in `docs/step3-security-evidence.md`.
-Steps 4–6 are not started on `main`.
+Step 4 (Area C, outbox / RabbitMQ / saga) is **done**: both relays publish to RabbitMQ with publisher
+confirms, every consumer is idempotent (`processed_messages`), failing messages are dead-lettered, and
+Booking runs the payment-timeout / late-payment saga — see the README's "Step 4" section and the
+"Outbox + relay + RabbitMQ" section below. Steps 5–6 (Areas D, E) belong to other owners — check open
+PRs before assuming their status.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -24,10 +28,13 @@ Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
              │  = /api/customer/transactions ─────────────────▶ services/payments      :4002  Express + Postgres pay_db
              ├─ ^~ /api/internal/  → 404 (service-to-service only)
              └─ everything else ───────────────────────────────▶ monolith (repo root)   :3000  Next.js + SQLite
+
+RabbitMQ :5672 (management UI :15672, guest/guest) — events between the three processes (Step 4);
+the gateway is not involved. Only POST /intents (monolith → Payments) is still a direct HTTP call.
 ```
 
 The monolith still owns Identity, Catalog, Providers, Booking, Bidding, Reviews, the `events`
-outbox and an `inbox_events` table. `lib/modules/` has **no `payments/` or `notifications/`** any
+outbox and a `processed_messages` inbox table. `lib/modules/` has **no `payments/` or `notifications/`** any
 more — don't recreate them or reintroduce their tables (`test/schema-split.test.js` guards this).
 
 ESM only (`"type": "module"`) — in the monolith and in both services.
@@ -95,7 +102,7 @@ so it never reaches GitHub.
 
 ### Monolith (repo root) — no Postgres, no sockets
 
-Verified with Node 20.20.2: **80/80 tests across 13 files**.
+Verified with Node 20.20.2 — run `npm test` for the current counts (they change every step, so none are recorded here).
 
 ```bash
 npm install
@@ -120,7 +127,7 @@ Each is its own npm package (own `package.json` / lockfile, Express 4, `pg`, `jo
 `zod`, `pino`). Tests run against a **real Postgres** via `DATABASE_URL`, serially
 (`--test-concurrency=1`). Easiest through Docker (below); otherwise
 `cd services/<name> && npm install && DATABASE_URL=postgres://… npm test`.
-Verified 2026-11-07 in Docker: **notifications 14/14, payments 24/24**.
+Run them in Docker (below) and read the summary line; counts change as tests are added.
 
 `docker compose --profile test run` starts `test-db` as a dependency and **leaves it running**
 afterwards; clean up with `docker compose --profile test rm -sf test-db`.
@@ -133,8 +140,16 @@ docker compose --profile test run --rm --build test                 # monolith s
 docker compose --profile test run --rm --build notifications-test   # real Postgres (test-db)
 docker compose --profile test run --rm --build payments-test        # real Postgres (test-db)
 bash deploy/keycloak/step3-evidence.sh   # stack must be up; real Keycloak tokens -> 200/401 table, ~70 s
+PAYMENT_TIMEOUT_SECONDS=30 docker compose up -d --build --wait     # short saga timeout for the demo ...
+PAYMENT_TIMEOUT_SECONDS=30 bash deploy/rabbitmq/step4-evidence.sh  # ... then RabbitMQ / DLQ / saga evidence, ~2-3 min
 docker compose down -v
 ```
+
+`step4-evidence.sh` is the Step 4 evidence: topology exists, events flow and queues drain, a booking
+succeeds while RabbitMQ is stopped and its events arrive after the restart, a poison message lands in
+`payments.events.dlq`, and an unpaid gateway booking is cancelled by the saga timeout (that case is
+SKIPped unless the stack was started with a short `PAYMENT_TIMEOUT_SECONDS`); exit 0 = all PASS.
+`SKIP_OUTAGE=1` skips the stop/start case.
 
 `step3-evidence.sh` is the Step 3 done-when evidence (forged / expired / wrong-audience tokens → 401
 on both services, through the gateway); exit 0 = all PASS. Its recorded output and the rest of the
@@ -143,7 +158,7 @@ script still runs from a Windows checkout.
 
 Browse through the **gateway on :8080**. `:3000` is the monolith directly (debugging only — the
 extracted routes don't exist there). Compose services: `gateway`, `edemand`, `notifications`,
-`payments`, `notif-db`, `pay-db`, `keycloak` (:8081), plus the `test` profile (`test`, `test-db`,
+`payments`, `notif-db`, `pay-db`, `keycloak` (:8081), `rabbitmq` (:5672, UI :15672), plus the `test` profile (`test`, `test-db`,
 `notifications-test`, `payments-test`). `deploy/test-db-init.sql` creates `notif_test` / `pay_test`.
 
 **Always pass `--build`.** There is no source bind-mount (only `gateway/nginx.conf` is mounted):
@@ -178,7 +193,8 @@ This is a team repo. The full team convention (in Thai, written for teammates) i
 - Shared hot-spot files — flag to the team before editing: `lib/db/schema.js`, `lib/db/seed.js`,
   `openapi.yaml`, `package.json`/`package-lock.json`, `app/globals.css`, `test/booking.test.js`,
   `docker-compose.yml`, `gateway/nginx.conf`, `lib/http/auth.js`, `lib/config.js`,
-  `test-helpers/*`.
+  `test-helpers/*`, and the three copies of the RabbitMQ topology (`lib/amqp/connection.js`,
+  `services/payments/src/amqp.js`, `services/notifications/src/amqp.js` — they must stay identical).
 - Keep `docs/GIT-WORKFLOW.md` in step if any of these rules change.
 
 Seed logins (all share `SEED_PASSWORD` = `eDemand-2026!`, exported from `lib/db/seed.js`):
@@ -237,7 +253,9 @@ export const POST = handle(async (req, { params }) => {
   importable under plain `node --test`.
 - Service-to-service routes live under `app/api/internal/**` (today: `POST /api/internal/events`).
   They authenticate with the `x-internal-token` header (`config.internalToken`), **never a user
-  JWT**, and nginx blocks `/api/internal/` from outside.
+  JWT**, and nginx blocks `/api/internal/` from outside. Since Step 4 events travel over RabbitMQ:
+  the `/internal/events` HTTP endpoints (monolith and both services) are no longer called by any
+  relay and remain only as a token-protected test / ops entry point.
 
 ### UI
 
@@ -323,9 +341,12 @@ Nothing is durable; recreate both together (`docker compose down` / `up`).
   each `order_item` at booking time.
 - `lib/config.js` is the only place that reads `process.env` (plus `db/index.js` resolving
   `DB_PATH`). Add new settings there. Step 2 added `PAYMENTS_URL`, `NOTIFICATIONS_URL`,
-  `INTERNAL_TOKEN`, `EVENT_SUBSCRIBERS`, `RELAY_INTERVAL_MS`. Step 3 removed `JWT_SECRET` /
+  `INTERNAL_TOKEN`, `RELAY_INTERVAL_MS`. Step 3 removed `JWT_SECRET` /
   `JWT_EXPIRES_IN` and added `KEYCLOAK_URL`, `KEYCLOAK_REALM`, `KEYCLOAK_ISSUER`, `JWKS_URL`,
   `JWT_AUDIENCE`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_SECRET`.
+  Step 4 removed `EVENT_SUBSCRIBERS` (HTTP delivery is gone) and added `AMQP_URL` (all three
+  processes; default `amqp://guest:guest@localhost:5672`), plus, in the monolith,
+  `PAYMENT_TIMEOUT_SECONDS` (default 900) and `SWEEP_INTERVAL_MS` (default 5000) for the saga timeout.
 
 ### Concurrency idioms — do not regress these
 
@@ -344,49 +365,82 @@ The whole point of several modules is that they are race-free. When touching the
   order + items + slot_holds + outbox event (a clash leaves zero partial rows). Only after it commits
   does a gateway booking call `POST /intents` (`Idempotency-Key = order_id`) and store
   `gateway_ref` on the order. If Payments is unreachable the order is **cancelled again
-  (compensation)** — releasing its slots and emitting `booking.cancelled` so Payments voids any
-  intent it did create — and the caller gets **503**.
+  (compensation, `reason: "payment_unavailable"`)** — releasing its slots and emitting
+  `booking.cancelled` so Payments voids any intent it did create — and the caller gets **503**.
 - **Idempotency**: `withIdempotency()` (`lib/db/idempotency.js`) replays a stored `{statusCode, body}`.
   Keys are scoped to the actor (`${actor}:${key}`). Used by `POST /api/bookings`. A replay of a
   gateway booking that already has `gateway_ref` does not call Payments again.
-- **Inbox dedupe (consumer side)**: every consumer records `(source, event_id)` under a PRIMARY KEY
-  **in the same transaction as the effect** — monolith `inbox_events` (`lib/db/inbox.js`,
-  `lib/outbox/inbound.js`), services `processed_events`. A redelivered event is a no-op.
+- **Inbox dedupe (consumer side)**: every consumer inserts `processed_messages(message_id PRIMARY KEY)`
+  **in the same transaction as the effect**, where `message_id = "<source>:<event id>"` (the AMQP
+  `messageId`) — monolith via `lib/db/inbox.js#recordInbound` / `lib/outbox/inbound.js`, services via
+  their repository. A redelivered message is a no-op and is acked.
+- **Saga timeout and late payment** (Booking orchestrates): `expireUnpaidOrders()` cancels gateway
+  orders that are still `payment_status = 'pending'` after `PAYMENT_TIMEOUT_SECONDS` through
+  `cancelInTx(order, "system", { reason: "payment_timeout", onlyIfUnpaid: true })`; the guard re-reads
+  the order **inside** the write lock so a payment that landed first wins. `applyPaymentSucceeded` on an
+  already-cancelled order records it as paid and emits a second `booking.cancelled`
+  (`reason: "late_payment"`) so Payments refunds; Payments' refund/void transitions are conditional, so
+  repeated `booking.cancelled` is safe. The sweeper is `lib/outbox/saga.js`, started from
+  `instrumentation.js`.
 - **Webhook dedupe** now lives in Payments: `webhook_events.gateway_event_id UNIQUE`
   (`services/payments`). Payments emits `payment.succeeded`; **Booking** flips its own
   `orders.payment_status` (`applyPaymentSucceeded` / `applyPaymentRefunded`).
 - **Intent idempotency** in Payments: `payment_intents.order_id UNIQUE`; a repeated `POST /intents`
   returns the existing intent (200) instead of creating a second (201).
 
-### Outbox + relay (eventual consistency) — Step 2 transport
+### Outbox + relay + RabbitMQ (eventual consistency) — Step 4 transport
 
 Every state change calls `insertEvent()` (`lib/db/events.js`) **inside the same transaction** as the
 change. The relay is **`lib/outbox/relay.js`** (`startRelay()` from `instrumentation.js`, every
-`RELAY_INTERVAL_MS`, default 1000 ms). For each unprocessed event, in id order, it (1) runs local
-handlers, (2) POSTs the envelope `{ source, id, type, aggregate_type, aggregate_id, payload,
-occurred_at }` to **every** URL in `EVENT_SUBSCRIBERS` with `x-internal-token`, and (3) only when all
-of that succeeded stamps `processed_at`. A failure stops the pass (ordering is preserved) and the
-event is retried next tick — **at-least-once**; consumers dedupe via their inbox. Payments has its
-own `outbox` + relay (`services/payments/src/relay.js`) delivering to the monolith's
-`/api/internal/events` and to Notifications. Step 4 replaces the HTTP delivery with RabbitMQ.
+`RELAY_INTERVAL_MS`, default 1000 ms). For each unprocessed event, in id order, it **publishes** the
+envelope `{ source, id, type, aggregate_type, aggregate_id, payload, occurred_at }` to the durable topic
+exchange `edemand.events` on a **confirm channel** (routing key = event type, `persistent: true`,
+`messageId = "<source>:<id>"`), and only after the broker confirms stamps `processed_at`. A failure stops
+the pass (ordering is preserved) and the event is retried next tick — **at-least-once**; consumers
+dedupe on `processed_messages`. If RabbitMQ is down, requests still succeed and events wait in the
+outbox. Payments has its own `outbox` + relay (`services/payments/src/relay.js`) doing the same. The
+publisher is injectable — `runRelayOnce({ publisher })` — so tests pass `fakeBroker.channel`.
+
+**Topology** is declared by `assertTopology()` and every process runs it on start (so a message is never
+published before its queue exists). It exists as **three identical copies** —
+`lib/amqp/connection.js`, `services/payments/src/amqp.js`, `services/notifications/src/amqp.js` — keep
+them in sync.
+
+| Queue | Consumer | Bound routing keys |
+|---|---|---|
+| `payments.events` | payments | `booking.completed`, `booking.cancelled` |
+| `booking.events` | monolith | `payment.succeeded`, `payment.refunded`, `review.created` |
+| `notifications.events` | notifications | `booking.status_changed`, `booking.completed`, `bid.accepted`, `review.created`, `provider.approved`, `payment.succeeded`, `payment.refunded` |
+
+All queues are **quorum queues** with `x-delivery-limit: 3`, `x-dead-letter-exchange: edemand.dlx` and a
+dead-letter queue `<queue>.dlq`. Changing a queue argument makes RabbitMQ reject the declaration
+(`PRECONDITION_FAILED`) — recreate the broker with `docker compose down -v` after editing the topology.
+
+**Consumers** use `startConsumer(queue, handle, log)` (also in each `amqp.js`): `prefetch(10)`, manual
+ack **after** `handle` has committed its DB transaction; a throw is a `nack` with requeue, and once the
+delivery limit is exceeded the broker moves the message to the `.dlq`. It reconnects every 2 s. Wiring:
+monolith `lib/outbox/consumer.js` → `receiveEvent()` (`lib/outbox/inbound.js`, synchronous transaction),
+Payments `src/consumer.js` → `service.handleEvent`, Notifications `src/consumer.js` →
+`service.handleEvent`. Never `await` inside the monolith's SQLite transaction.
 
 | Event | Producer | Consumers |
 |---|---|---|
-| `booking.status_changed`, `bid.accepted`, `review.created`, `provider.approved` | monolith | notifications (`review.created` also recomputes ratings locally) |
+| `booking.status_changed`, `bid.accepted`, `provider.approved` | monolith | notifications |
+| `review.created` | monolith | monolith (recomputes ratings), notifications |
 | `booking.completed` | monolith | payments (wallet credit), notifications |
-| `booking.cancelled` | monolith | payments (refund or void) |
+| `booking.cancelled` | monolith | payments (refund or void) — `reason` is `customer_cancelled`, `payment_unavailable`, `payment_timeout` or `late_payment` |
 | `payment.succeeded`, `payment.refunded` | payments | monolith (mark paid / refunded), notifications |
 
-**The rating aggregate on `services`/`provider_profiles` is recomputed in the relay's local
-handler**, driven by `review.created` — deliberately *not* inline in the review handler. A fresh
-review leaves the aggregate stale until the relay runs. This staleness is a tested, intentional
-teaching point; do not "fix" it by updating the aggregate inline.
+**The rating aggregate on `services`/`provider_profiles` is recomputed by the monolith's own consumer of
+`review.created`** (a handler in `lib/outbox/inbound.js`) — deliberately *not* inline in the review
+handler. A fresh review leaves the aggregate stale until the event has been published and consumed. This
+staleness is a tested, intentional teaching point; do not "fix" it by updating the aggregate inline.
 
 ## Tests
 
 ### Monolith
 
-`node --test test/*.test.js`, **80 tests across 13 files**, no socket. The suite **imports the real
+`node --test test/*.test.js`, no socket. The suite **imports the real
 App Router route handlers and calls them in-process**. Conventions that matter:
 
 - `test-helpers/boot.js` **must be the first import in every test file** — it sets
@@ -394,10 +448,14 @@ App Router route handlers and calls them in-process**. Conventions that matter:
   dynamically imports the DB layer, so the env is in place before any handler's static module graph
   (config, db) evaluates.
 - **The extracted services are faked in-process** by `test-helpers/fakeServices.js`, which
-  replaces `globalThis.fetch`: `POST http://payments.test/intents` and the two subscriber
-  `/internal/events` URLs are answered locally; anything else falls through to the real fetch.
-  Flip `fake.paymentsDown` / `fake.subscribersDown` to exercise compensation and relay retry;
-  inspect `fake.intentCalls` / `fake.delivered`; call `fake.reset()` between scenarios.
+  replaces `globalThis.fetch`: `POST http://payments.test/intents` is answered locally; anything else
+  falls through to the real fetch. Flip `fake.paymentsDown` to exercise compensation; inspect
+  `fake.intentCalls`; call `fake.reset()` between scenarios.
+- **RabbitMQ is faked the same way** by `fakeBroker` (same file, re-exported from `boot.js`):
+  `fakeBroker.channel.publish` has amqplib's confirm-channel signature, so the real relay and
+  `publish()` run unchanged; `fakeBroker.down = true` simulates an outage; `fakeBroker.published` /
+  `fakeBroker.queues` / `fakeBroker.dlq` show what happened; `await fakeBroker.consume(queue, handler)`
+  plays the consumer loop (throw = nack + redelivery, then DLQ). `fake.reset()` resets it too.
 - **Keycloak is faked the same way** (`test-helpers/fakeKeycloak.js`, host `http://keycloak.test`):
   token endpoint (password + client_credentials), JWKS and admin create-user, starting with the 7 seed
   users. So `test-helpers/auth.js` logins/registrations go through the real routes unchanged.
@@ -409,8 +467,11 @@ App Router route handlers and calls them in-process**. Conventions that matter:
   `Request` and invokes `handler(req, { params })`. `test-helpers/auth.js` provides
   `registerCustomer`, `loginSeededCustomer/Provider`, `loginAdmin`, `futureWeekday()` (returns a
   Mon–Sat date so bookings land inside seeded 09:00–18:00 hours).
-- The relay is async now: `await runRelayOnce()` (from `lib/outbox/relay.js`) to drain events
-  synchronously in a test instead of waiting for the interval.
+- The relay is async: `await runRelayOnce({ publisher: fakeBroker.channel })` (from
+  `lib/outbox/relay.js`) publishes pending events synchronously in a test instead of waiting for the
+  interval, and `await fakeBroker.consume("booking.events", (e) => receiveEvent(e))` delivers them.
+  `test/saga.test.js` covers the payment timeout (`expireUnpaidOrders(now)` takes a clock argument) and
+  the late-payment path.
 - `test/booking.test.js` uses **sequential subtests that share state** and asserts the first order is
   `8001`. Don't reorder them or add a booking before the first subtest.
 - `test/schema-split.test.js` asserts the moved tables are gone from the SQLite schema.
@@ -424,6 +485,8 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   a JWKS over real HTTP; `helpers.js` points `JWKS_URL` / `KEYCLOAK_ISSUER` at it, so `requireAuth`
   runs its production code path. `tokenFor(role, appId)` signs Keycloak-shaped tokens (sync);
   `forgedToken` / `expiredToken` / `wrongAudienceToken` / `hs256Token` build the ones that must 401.
+- The Payments relay test passes its own fake `publisher` (a `publish(exchange, key, content, options,
+  cb)` object) to `runRelayOnce`; no RabbitMQ is needed for any service test.
 - **Never import `../src/*` statically in a test file** — ESM evaluates it (and `config.js`) before
   `helpers.js` has set the env, and every user token then fails with 503. Import `src/` dynamically
   after `helpers.js` (see `payments.test.js` → `runRelayOnce`).
@@ -450,9 +513,15 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   restart: `docker compose restart keycloak` keeps the old realm ("Realm 'edemand' already exists.
   Import skipped"). Use `docker compose up -d --force-recreate --wait keycloak` (or `down` / `up`).
   Tell teammates in the PR — after pulling a realm change they must recreate too.
-- **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway and Step 3
-  (Keycloak, per-service JWT verification, ownership, BOLA) are done; the team still adds a real
-  broker (RabbitMQ) with outbox/saga/DLQ (Step 4), resilience — timeouts, retries, fault switches
+- **RabbitMQ gotchas.** (1) Queue declarations are strict: change an argument (e.g. `x-delivery-limit`)
+  and every process fails with `PRECONDITION_FAILED` until the broker is recreated
+  (`docker compose down -v`). (2) Management-UI / API counters refresh about every 5 s — poll, don't
+  read once (the evidence script does). (3) After a broker restart the exchange's counters start from 0.
+  (4) A poison message (handler always throws) is retried by redelivery and then dead-lettered; inspect
+  `*.dlq` in the UI, nothing replays them automatically.
+- **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway, Step 3
+  (Keycloak, per-service JWT verification, ownership, BOLA) and Step 4 (outbox, RabbitMQ, idempotent
+  consumers, DLQ, saga) are done; the team still adds resilience — timeouts, retries, fault switches
   (Step 5), and observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
   second-guess them; follow `docs/STEPS.md` for each step's requirements and "done when" criteria.
 - Still out of scope: real payment gateways, chat, cart, subscriptions, SOAP/WSDL.

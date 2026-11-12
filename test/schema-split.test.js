@@ -13,7 +13,7 @@ test("extracted tables are not in the monolith database", () => {
   for (const gone of ["payment_intents", "transactions", "provider_wallets", "webhook_events", "notifications"]) {
     assert.ok(!tables.includes(gone), `${gone} must live in its own service now`);
   }
-  for (const kept of ["orders", "events", "inbox_events", "idempotency_keys"]) {
+  for (const kept of ["orders", "events", "processed_messages", "idempotency_keys"]) {
     assert.ok(tables.includes(kept), `${kept} is still the monolith's`);
   }
   const cols = getDb().prepare("PRAGMA table_info(orders)").all().map((c) => c.name);

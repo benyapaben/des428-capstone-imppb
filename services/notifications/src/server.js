@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import { getPool, closePool } from "./db.js";
 import { migrate } from "./schema.js";
 import { logger } from "./logger.js";
+import { startNotificationsConsumer } from "./consumer.js";
 
 async function waitForDb(attempts = 30) {
   for (let i = 1; ; i++) {
@@ -22,6 +23,7 @@ async function waitForDb(attempts = 30) {
 await waitForDb();
 await migrate(getPool());
 logger.info("notif_db migrated");
+startNotificationsConsumer().catch((err) => logger.error({ err: err.message }, "notifications consumer failed to start"));
 
 const server = createApp().listen(config.port, () => logger.info({ port: config.port }, "notifications service listening"));
 

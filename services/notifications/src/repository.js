@@ -1,4 +1,4 @@
-// The notifications service owns the notifications + processed_events tables. SQL only.
+// The notifications service owns the notifications + processed_messages tables. SQL only.
 import { query } from "./db.js";
 
 export async function insert(db, { recipientRole, recipientId, type, title, body, orderId }) {
@@ -32,12 +32,12 @@ export async function markRead(id, role, recipientId) {
   return rowCount;
 }
 
-// Inbox dedupe. true = first time we see (source, event_id); false = a redelivery.
+// Inbox dedupe. true = first time we see this message_id; false = a redelivery.
 export async function recordEvent(db, source, eventId, type) {
   const { rowCount } = await db.query(
-    `INSERT INTO processed_events (source, event_id, type) VALUES ($1, $2, $3)
-     ON CONFLICT (source, event_id) DO NOTHING`,
-    [source, eventId, type]
+    `INSERT INTO processed_messages (message_id, source, event_id, type) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (message_id) DO NOTHING`,
+    [`${source}:${eventId}`, source, eventId, type]
   );
   return rowCount === 1;
 }

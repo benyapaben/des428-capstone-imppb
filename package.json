@@ -17,6 +17,7 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "amqplib": "^0.10.4",
     "bcryptjs": "2.4.3",
     "better-sqlite3": "11.10.0",
     "jose": "5.10.0",

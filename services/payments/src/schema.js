@@ -2,7 +2,7 @@
 // inbox. Dropped and recreated on every boot (deterministic, like the monolith). There are no foreign
 // keys to orders/providers any more: those live in another database, and ids are just values here.
 export const SCHEMA_SQL = `
-DROP TABLE IF EXISTS processed_events;
+DROP TABLE IF EXISTS processed_messages;
 DROP TABLE IF EXISTS outbox;
 DROP TABLE IF EXISTS webhook_events;
 DROP TABLE IF EXISTS provider_wallets;
@@ -67,13 +67,14 @@ CREATE TABLE outbox (
 );
 CREATE INDEX idx_outbox_unpublished ON outbox (id) WHERE published_at IS NULL;
 
--- Inbox: events consumed from the monolith (booking.completed / booking.cancelled), deduped by (source, id).
-CREATE TABLE processed_events (
+-- Inbox: messages consumed from the monolith (booking.completed / booking.cancelled). message_id is
+-- "<source>:<id>", the AMQP messageId.
+CREATE TABLE processed_messages (
+  message_id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
   event_id INTEGER NOT NULL,
   type TEXT NOT NULL,
-  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (source, event_id)
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 `;
 

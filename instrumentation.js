@@ -7,5 +7,9 @@ export async function register() {
     bootstrapDb();
     const { startRelay } = await import("./lib/outbox/relay.js");
     startRelay();
+    const { startMonolithConsumer } = await import("./lib/outbox/consumer.js");
+    startMonolithConsumer();
+    const { startSagaTimeouts } = await import("./lib/outbox/saga.js");
+    startSagaTimeouts();
   }
 }

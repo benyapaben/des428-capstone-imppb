@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { freshBoot, getDb, fake, SUBSCRIBERS } from "../test-helpers/boot.js";
+import { freshBoot, getDb, fake, fakeBroker } from "../test-helpers/boot.js";
 import { call } from "../test-helpers/call.js";
 import { loginSeededCustomer, loginSeededProvider, futureWeekday } from "../test-helpers/auth.js";
 import { runRelayOnce } from "../lib/outbox/relay.js";
+import { receiveEvent } from "../lib/outbox/inbound.js";
 
 import * as bookings from "../app/api/bookings/route.js";
 import * as confirm from "../app/api/bookings/[id]/confirm/route.js";
@@ -55,34 +56,41 @@ test("reviews + outbox eventual consistency", async (t) => {
     assert.equal(svc.rating_avg, 0);
   });
 
-  await t.test("a subscriber outage leaves events unprocessed (retried later), in order", async () => {
-    fake.subscribersDown = true;
-    const processed = await runRelayOnce();
-    assert.equal(processed, 0, "nothing marked processed while a subscriber is down");
+  await t.test("a broker outage leaves events unprocessed (retried later), in order", async () => {
+    fakeBroker.down = true;
+    const processed = await runRelayOnce({ publisher: fakeBroker.channel });
+    assert.equal(processed, 0, "nothing marked processed while the broker is down");
     const pending = getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE processed_at IS NULL").get().n;
     assert.ok(pending > 0, "events stay in the outbox");
-    fake.subscribersDown = false;
+    fakeBroker.down = false;
   });
 
-  await t.test("running the relay recomputes the aggregate and delivers every event to every subscriber", async () => {
-    const processed = await runRelayOnce();
+  await t.test("the relay publishes every event; the CONSUMER recomputes the aggregate", async () => {
+    const processed = await runRelayOnce({ publisher: fakeBroker.channel });
     assert.ok(processed > 0, "relay drained events");
+
+    const stale = getDb().prepare("SELECT rating_count FROM services WHERE id = ?").get(SERVICE_ID);
+    assert.equal(stale.rating_count, 0, "published but not consumed yet -> still stale");
+
+    await fakeBroker.consume("booking.events", (envelope) => receiveEvent(envelope));
 
     const svc = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
     assert.equal(svc.rating_count, 1);
     assert.equal(svc.rating_avg, 5);
-
     const prof = getDb().prepare("SELECT rating_avg, rating_count FROM provider_profiles WHERE provider_id = ?").get(provider.id);
     assert.equal(prof.rating_count, 1, "provider aggregate recomputed too");
 
-    for (const url of SUBSCRIBERS) {
-      const reviews = fake.delivered.get(url).filter((e) => e.type === "review.created");
-      assert.ok(reviews.length >= 1, `${url} received review.created`);
-      assert.equal(reviews.at(-1).source, "monolith");
-      assert.equal(reviews.at(-1).payload.provider_id, provider.id);
-    }
-    const ids = fake.delivered.get(SUBSCRIBERS[0]).map((e) => e.id);
-    assert.deepEqual(ids, [...ids].sort((a, b) => a - b), "delivered in outbox order");
+    const reviews = fakeBroker.published.filter((m) => m.routingKey === "review.created");
+    assert.ok(reviews.length >= 1);
+    assert.equal(reviews.at(-1).envelope.source, "monolith");
+    assert.equal(reviews.at(-1).envelope.payload.provider_id, provider.id);
+    assert.equal(reviews.at(-1).messageId, `monolith:${reviews.at(-1).envelope.id}`);
+    assert.ok(
+      fakeBroker.queues.get("notifications.events").some((m) => m.routingKey === "review.created"),
+      "notifications' queue also received review.created"
+    );
+    const ids = fakeBroker.published.map((m) => m.envelope.id);
+    assert.deepEqual(ids, [...ids].sort((a, b) => a - b), "published in outbox order");
   });
 
   await t.test("a duplicate review -> 409", async () => {
@@ -90,13 +98,21 @@ test("reviews + outbox eventual consistency", async (t) => {
     assert.equal(dup.status, 409);
   });
 
-  await t.test("the relay is idempotent: a second pass does not double-apply", async () => {
-    const before = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
-    const deliveredBefore = fake.delivered.get(SUBSCRIBERS[0]).length;
-    const processed = await runRelayOnce();
+    await t.test("the relay is idempotent: a second pass publishes nothing", async () => {
+    const publishedBefore = fakeBroker.published.length;
+    const processed = await runRelayOnce({ publisher: fakeBroker.channel });
     assert.equal(processed, 0, "no unprocessed events remain");
+    assert.equal(fakeBroker.published.length, publishedBefore, "nothing re-published");
+  });
+
+  await t.test("a duplicate delivery of review.created is a no-op (processed once)", async () => {
+    const before = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
+    const msg = fakeBroker.published.find((m) => m.routingKey === "review.created");
+    fakeBroker.queues.get("booking.events").push(msg);          // the broker redelivers the same message
+    const results = [];
+    await fakeBroker.consume("booking.events", (envelope) => { results.push(receiveEvent(envelope)); });
+    assert.deepEqual(results, [{ duplicate: true }]);
     const after = getDb().prepare("SELECT rating_avg, rating_count FROM services WHERE id = ?").get(SERVICE_ID);
-    assert.deepEqual(after, before, "aggregate unchanged on a second relay pass");
-    assert.equal(fake.delivered.get(SUBSCRIBERS[0]).length, deliveredBefore, "nothing re-delivered");
+    assert.deepEqual(after, before);
   });
 });

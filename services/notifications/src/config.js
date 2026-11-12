@@ -13,5 +13,5 @@ export const config = Object.freeze({
     `${process.env.KEYCLOAK_ISSUER || "http://localhost:8081/realms/edemand"}/protocol/openid-connect/certs`,
   jwtAudience: process.env.JWT_AUDIENCE || "notifications-api",
   internalToken: process.env.INTERNAL_TOKEN || "edemand-internal-token",
-  logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"),
+  logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"), amqpUrl: process.env.AMQP_URL || "amqp://guest:guest@localhost:5672",
 });

@@ -12,7 +12,6 @@ process.env.DB_PATH = ":memory:";
 // Set synchronously, before the first await, like NODE_ENV above.
 process.env.PAYMENTS_URL = "http://payments.test";
 process.env.NOTIFICATIONS_URL = "http://notifications.test";
-process.env.EVENT_SUBSCRIBERS = "http://notifications.test/internal/events,http://payments.test/internal/events";
 // Step 3: Keycloak is faked too (fakeKeycloak.js). The issuer keeps the real pinned value; only the
 // URL the monolith calls (token endpoint, JWKS, admin API) points at the fake.
 process.env.KEYCLOAK_URL = "http://keycloak.test";
@@ -21,7 +20,7 @@ delete process.env.JWKS_URL;      // derived from KEYCLOAK_URL
 delete process.env.JWT_AUDIENCE;  // default: edemand-api
 
 const fakes = await import("./fakeServices.js");
-export const { fake, fakeKeycloak, SUBSCRIBERS } = fakes;
+export const { fake, fakeBroker, fakeKeycloak } = fakes;
 
 const { bootstrapDb } = await import("../lib/db/bootstrap.js");
 const { getDb, closeDb } = await import("../lib/db/index.js");

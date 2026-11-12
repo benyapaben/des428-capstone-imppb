@@ -101,7 +101,7 @@ test("booking <-> payments seam", async (t) => {
     const again = await deliver(env);
     assert.equal(again.status, 200);
     assert.equal(again.body.duplicate, true);
-    const inbox = getDb().prepare("SELECT COUNT(*) AS n FROM inbox_events WHERE source = 'payments' AND event_id = ?").get(env.id).n;
+    const inbox = getDb().prepare("SELECT COUNT(*) AS n FROM processed_messages WHERE message_id = ?").get(`payments:${env.id}`).n;
     assert.equal(inbox, 1);
 
     const detail = await call(bookingDetail.GET, { token: customer.token, params: { id: String(orderId) } });

@@ -7,6 +7,7 @@ import { getPool } from "./db.js";
 import * as repository from "./repository.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
+import { getPublisher, publish } from "./amqp.js";
 
 export const SOURCE = "payments";
 let busy = false;
@@ -24,21 +25,8 @@ export function toEnvelope(row) {
   };
 }
 
-async function deliver(url, envelope) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-internal-token": config.internalToken,
-      "x-request-id": `evt-${SOURCE}-${envelope.id}`,
-    },
-    body: JSON.stringify(envelope),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) throw new Error(`subscriber ${url} answered ${res.status}`);
-}
 
-export async function runRelayOnce({ subscribers = config.eventSubscribers } = {}) {
+export async function runRelayOnce({ publisher } = {}) {
   if (busy) return 0;
   busy = true;
   let published = 0;
@@ -47,7 +35,7 @@ export async function runRelayOnce({ subscribers = config.eventSubscribers } = {
     for (const row of await repository.listUnpublished(db, 100)) {
       const envelope = toEnvelope(row);
       try {
-        for (const url of subscribers) await deliver(url, envelope);
+        await publish(publisher ?? (await getPublisher()), envelope);
       } catch (err) {
         logger.warn({ err: err.message, eventId: row.id, type: row.type }, "relay: delivery failed, will retry");
         break;
@@ -66,7 +54,7 @@ export function startRelay() {
     runRelayOnce().catch((err) => logger.error({ err: err.message }, "relay: pass failed"));
   }, config.relayIntervalMs);
   timer.unref?.();
-  logger.info({ subscribers: config.eventSubscribers }, "outbox relay started");
+  logger.info("outbox relay started (publishing to RabbitMQ)");
 }
 
 export function stopRelay() {

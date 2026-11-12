@@ -244,38 +244,37 @@ test("payments service", async (t) => {
     assert.equal(await count("SELECT COUNT(*) AS n FROM transactions WHERE order_id = 8005"), 0);
   });
 
-  // ---------------- the outbox relay ----------------
-  await t.test("relay: subscriber down -> nothing published; back up -> every event delivered in order, once", async () => {
-    const monolith = await startSubscriber();
-    const notifications = await startSubscriber();
-    const subscribers = [monolith.url, notifications.url];
-    try {
-      monolith.state.down = true;
-      assert.equal(await runRelayOnce({ subscribers }), 0);
-      assert.ok(await count("SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL") > 0);
+  await t.test("relay: broker down -> nothing published; back up -> every event published in order, once", async () => {
+    const published = [];
+    const state = { down: false };
+    const publisher = {
+      publish(exchange, routingKey, content, options, cb) {
+        if (state.down) { cb(new Error("broker down")); return false; }
+        published.push({ routingKey, messageId: options.messageId, envelope: JSON.parse(content.toString()) });
+        cb(null);
+        return true;
+      },
+    };
 
-      monolith.state.down = false;
-      const published = await runRelayOnce({ subscribers });
-      const expected = await count("SELECT COUNT(*) AS n FROM outbox");
-      assert.equal(published, expected);
+    state.down = true;
+    assert.equal(await runRelayOnce({ publisher }), 0);
+    assert.ok(await count("SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL") > 0);
 
-      for (const sub of [monolith, notifications]) {
-        const bodies = sub.received.map((r) => r.body);
-        assert.equal(bodies.length, expected);
-        assert.ok(bodies.every((b) => b.source === "payments"));
-        assert.deepEqual(bodies.map((b) => b.id), [...bodies.map((b) => b.id)].sort((a, b) => a - b));
-        assert.equal(sub.received[0].headers["x-internal-token"], config.internalToken);
-      }
-      assert.deepEqual(
-        [...new Set(monolith.received.map((r) => r.body.type))].sort(),
-        ["payment.refunded", "payment.succeeded"]
-      );
+    state.down = false;
+    const sent = await runRelayOnce({ publisher });
+    const expected = await count("SELECT COUNT(*) AS n FROM outbox");
+    assert.equal(sent, expected);
+    assert.equal(published.length, expected);
+    assert.ok(published.every((m) => m.envelope.source === "payments"));
+    assert.ok(published.every((m) => m.messageId === `payments:${m.envelope.id}`));
+    const ids = published.map((m) => m.envelope.id);
+    assert.deepEqual(ids, [...ids].sort((a, b) => a - b));
+    assert.deepEqual(
+      [...new Set(published.map((m) => m.routingKey))].sort(),
+      ["payment.refunded", "payment.succeeded"]
+    );
 
-      assert.equal(await runRelayOnce({ subscribers }), 0, "second pass publishes nothing");
-      assert.equal(monolith.received.length, expected, "no redelivery after publish");
-    } finally {
-      await monolith.close();
-      await notifications.close();
-    }
+    assert.equal(await runRelayOnce({ publisher }), 0, "second pass publishes nothing");
+    assert.equal(published.length, expected, "no re-publish after confirm");
   });
 });

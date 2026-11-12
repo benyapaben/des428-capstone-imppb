@@ -16,10 +16,7 @@ export const config = Object.freeze({
   // Shared secret the (mock) gateway signs its webhook callbacks with.
   webhookSecret: process.env.WEBHOOK_SECRET || "edemand-webhook-secret",
   // Where the outbox relay delivers payment.* events (Step 2 transport; RabbitMQ in Step 4).
-  eventSubscribers: (process.env.EVENT_SUBSCRIBERS ??
-    "http://localhost:3000/api/internal/events,http://localhost:4001/internal/events")
-    .split(",").map((s) => s.trim()).filter(Boolean),
-  relayIntervalMs: parseInt(process.env.RELAY_INTERVAL_MS, 10) || 1000,
+  relayIntervalMs: parseInt(process.env.RELAY_INTERVAL_MS, 10) || 1000, amqpUrl: process.env.AMQP_URL || "amqp://guest:guest@localhost:5672",
   // Wallet rows seeded on boot — the same provider ids the monolith seeds (sparkle, fixit, glow).
   seedProviderIds: (process.env.SEED_PROVIDER_IDS || "1,2,3").split(",").map(Number).filter(Boolean),
   logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"),

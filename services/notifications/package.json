@@ -12,6 +12,7 @@
     "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
+    "amqplib": "^0.10.4",
     "express": "4.21.2",
     "jose": "5.10.0",
     "pg": "8.13.1",

@@ -1,5 +1,5 @@
 // Payments & Wallet owns payment_intents, transactions, provider_wallets, webhook_events, outbox and
-// processed_events. SQL only. Every function takes `db` (the pool or a transaction client) so the
+// processed_messages. SQL only. Every function takes `db` (the pool or a transaction client) so the
 // service layer decides what runs inside one transaction.
 
 // ---- payment_intents ----
@@ -106,12 +106,12 @@ export async function markPublished(db, id) {
   return rowCount;
 }
 
-// ---- processed_events : the inbox ----
+// ---- processed_messages : the inbox ----
 export async function recordInbound(db, source, eventId, type) {
   const { rowCount } = await db.query(
-    `INSERT INTO processed_events (source, event_id, type) VALUES ($1, $2, $3)
-     ON CONFLICT (source, event_id) DO NOTHING`,
-    [source, eventId, type]
+    `INSERT INTO processed_messages (message_id, source, event_id, type) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (message_id) DO NOTHING`,
+    [`${source}:${eventId}`, source, eventId, type]
   );
   return rowCount === 1;
 }

@@ -6,6 +6,7 @@ import { getPool, closePool } from "./db.js";
 import { migrate, seed } from "./schema.js";
 import { startRelay, stopRelay } from "./relay.js";
 import { logger } from "./logger.js";
+  import { startPaymentsConsumer } from "./consumer.js";
 
 async function waitForDb(attempts = 30) {
   for (let i = 1; ; i++) {
@@ -24,6 +25,7 @@ await waitForDb();
 await migrate(getPool());
 await seed(getPool(), config.seedProviderIds);
 logger.info({ wallets: config.seedProviderIds }, "pay_db migrated and seeded");
+startPaymentsConsumer().catch((err) => logger.error({ err: err.message }, "payments consumer failed to start"));
 startRelay();
 
 const server = createApp().listen(config.port, () => logger.info({ port: config.port }, "payments service listening"));

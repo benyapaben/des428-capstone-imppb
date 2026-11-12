@@ -1,7 +1,7 @@
 // notif_db schema. Like the monolith, the service drops and recreates its tables on every boot so a
 // fresh `docker compose up` is deterministic.
 export const SCHEMA_SQL = `
-DROP TABLE IF EXISTS processed_events;
+DROP TABLE IF EXISTS processed_messages;
 DROP TABLE IF EXISTS notifications;
 
 CREATE TABLE notifications (
@@ -17,13 +17,13 @@ CREATE TABLE notifications (
 );
 CREATE INDEX idx_notifications_recipient ON notifications (recipient_role, recipient_id);
 
--- Inbox: (source, event_id) is the dedupe key for at-least-once delivery.
-CREATE TABLE processed_events (
+-- Inbox: message_id ("<source>:<id>", the AMQP messageId) is the dedupe key for at-least-once delivery.
+CREATE TABLE processed_messages (
+  message_id TEXT PRIMARY KEY,
   source TEXT NOT NULL,
   event_id INTEGER NOT NULL,
   type TEXT NOT NULL,
-  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (source, event_id)
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 `;
 
