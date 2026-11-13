@@ -2,11 +2,18 @@
 // pooled client, so the inbox dedupe row and the state change it guards commit together.
 import pg from "pg";
 import { config } from "./config.js";
+import { logger } from "./logger.js";
 
 let pool;
 
 export function getPool() {
-  if (!pool) pool = new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
+  if (!pool) {
+    pool = new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
+    // An idle pooled client emits 'error' when the server drops it (e.g. Postgres restarts). Without a
+    // listener that is an unhandled 'error' event and kills the process; the pool discards the broken
+    // client by itself, so logging is enough and the next query opens a fresh connection.
+    pool.on("error", (err) => logger.warn({ err: err.message }, "idle database client lost"));
+  }
   return pool;
 }
 
