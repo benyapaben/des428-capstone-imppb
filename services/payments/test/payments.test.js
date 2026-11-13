@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import {
-  boot, tokenFor, request, sendEvent, sql, createIntent, webhook, startSubscriber, config,
+  boot, tokenFor, request, sendEvent, sql, createIntent, webhook, config,
   forgedToken, expiredToken, wrongAudienceToken, hs256Token,
 } from "./helpers.js";
 // Dynamic on purpose: a static import of src/ would evaluate config.js before helpers.js has set the

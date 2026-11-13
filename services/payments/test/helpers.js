@@ -67,27 +67,3 @@ export function createIntent(base, body, { key = String(body.order_id), token = 
 export function webhook(base, body, secret = config.webhookSecret) {
   return request(base, "/api/payments/webhook", { body, headers: { "x-webhook-secret": secret } });
 }
-
-// A throwaway HTTP server standing in for a subscriber (monolith / notifications) of the relay.
-export async function startSubscriber() {
-  const http = await import("node:http");
-  const received = [];
-  const state = { down: false };
-  const server = http.createServer((req, res) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      if (state.down) { res.writeHead(503); return res.end(); }
-      received.push({ headers: req.headers, body: JSON.parse(data) });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end('{"received":true}');
-    });
-  });
-  await new Promise((r) => server.listen(0, r));
-  return {
-    url: `http://127.0.0.1:${server.address().port}/internal/events`,
-    received,
-    state,
-    close: () => new Promise((r) => server.close(r)),
-  };
-}

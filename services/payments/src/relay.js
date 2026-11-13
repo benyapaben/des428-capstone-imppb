@@ -1,7 +1,7 @@
 // Payments' outbox relay. Same contract as the monolith's: publish each payment.* event, in id order,
 // to the RabbitMQ exchange on a confirm channel (the monolith and notifications consume it from their
 // own queues), and only once the broker confirms it stamp published_at. A failure stops the pass; the
-// event is retried next tick. Consumers dedupe by message id ("<source>:<id>").
+// event is retried next tick. Consumers dedupe on "<source>:<id>" built from the envelope.
 // (Single instance assumed: two replicas would need SELECT ... FOR UPDATE SKIP LOCKED + ordering care.)
 import { getPool } from "./db.js";
 import * as repository from "./repository.js";
