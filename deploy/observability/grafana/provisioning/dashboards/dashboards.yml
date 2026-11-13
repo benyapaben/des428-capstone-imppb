@@ -1,0 +1,12 @@
+# Step 6 / Area E (E1): load every dashboard JSON in deploy/observability/grafana/dashboards/
+# (mounted at /var/lib/grafana/dashboards). The RED dashboard itself arrives with E6.
+apiVersion: 1
+
+providers:
+  - name: edemand
+    folder: edemand
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

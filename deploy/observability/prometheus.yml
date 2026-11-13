@@ -1,0 +1,31 @@
+# Step 6 / Area E (E1): Prometheus scrapes each process's /metrics directly. No OTel Collector in
+# between: at our size one scrape config is simpler to run and to explain than a collector pipeline.
+#
+# The three app targets do not expose /metrics until E6 lands, so until then they show as DOWN
+# (up == 0) at http://localhost:9090/targets. That is expected, not a broken boot.
+global:
+  scrape_interval: 5s       # short on purpose: the demo wants a dashboard that moves within seconds
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: edemand
+    metrics_path: /api/metrics
+    static_configs:
+      - targets: ["edemand:3000"]
+        labels: { service: edemand }
+
+  - job_name: payments
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["payments:4002"]
+        labels: { service: payments }
+
+  - job_name: notifications
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["notifications:4001"]
+        labels: { service: notifications }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
