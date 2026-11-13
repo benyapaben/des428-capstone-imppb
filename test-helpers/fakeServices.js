@@ -1,7 +1,9 @@
-// In-process stand-ins for the extracted services, so the monolith suite still needs no sockets.
-// Replaces globalThis.fetch: requests to the fake payments / notifications / Keycloak hosts are
-// answered here, anything else falls through to the real fetch. Tests flip `paymentsDown` /
-// `subscribersDown` / `fakeKeycloak.down` to exercise the failure paths (compensation, relay retry).
+// In-process stand-ins for the extracted services and the broker, so the monolith suite still needs
+// no sockets. Replaces globalThis.fetch: POST /intents on the fake payments host and the fake Keycloak
+// host are answered here, anything else falls through to the real fetch. `fakeBroker` stands in for
+// RabbitMQ: the real relay publishes into it (with confirms) and `consume()` plays a consumer,
+// redelivering failed messages and dead-lettering them after 3 tries. Tests flip `fake.paymentsDown`,
+// `fakeBroker.down` and `fakeKeycloak.down` to exercise the failure paths (compensation, relay retry).
 import { randomUUID } from "node:crypto";
 import { fakeKeycloak, handleKeycloak } from "./fakeKeycloak.js";
 import { QUEUES } from "../lib/amqp/connection.js";
@@ -55,10 +57,8 @@ export const fake = {
   paymentsDown: false,
   intents: new Map(),          // Idempotency-Key -> intent
   intentCalls: [],             // every POST /intents { headers, body }
-  delivered: new Map(SUBSCRIBERS.map((u) => [u, []])), // subscriber url -> envelopes
   reset() {
     this.paymentsDown = false;
-    this.subscribersDown = false;
     this.intents.clear();
     this.intentCalls.length = 0;
     fakeBroker.reset();
