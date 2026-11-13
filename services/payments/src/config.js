@@ -19,6 +19,12 @@ export const config = Object.freeze({
   // consumer reads booking.* events from the same broker.
   relayIntervalMs: parseInt(process.env.RELAY_INTERVAL_MS, 10) || 1000,
   amqpUrl: process.env.AMQP_URL || "amqp://guest:guest@localhost:5672",
+  // RabbitMQ resilience: a publish with no broker confirm after publishTimeoutMs fails (the relay retries
+  // it next tick); a consumer retries a failing handler consumerRetries times, waiting consumerRetryBaseMs
+  // doubled each time (~15.5 s with the defaults), before handing the message back to the broker.
+  publishTimeoutMs: parseInt(process.env.PUBLISH_TIMEOUT_MS, 10) || 5000,
+  consumerRetries: Math.max(0, parseInt(process.env.CONSUMER_RETRIES ?? "5", 10) || 0),
+  consumerRetryBaseMs: parseInt(process.env.CONSUMER_RETRY_BASE_MS, 10) || 500,
   // Wallet rows seeded on boot — the same provider ids the monolith seeds (sparkle, fixit, glow).
   seedProviderIds: (process.env.SEED_PROVIDER_IDS || "1,2,3").split(",").map(Number).filter(Boolean),
   logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"),
