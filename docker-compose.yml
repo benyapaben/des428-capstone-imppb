@@ -17,6 +17,16 @@ x-keycloak-env: &keycloak-env
   KEYCLOAK_ISSUER: http://localhost:8081/realms/edemand
   JWKS_URL: http://keycloak:8080/realms/edemand/protocol/openid-connect/certs
 
+# Step 6 (E2): standard OpenTelemetry settings, read by the SDK in services/*/src/otel.js. Traces go
+# over OTLP/HTTP straight to Jaeger. Only traces: metrics come from Prometheus scrapes (E6), logs stay
+# on stdout. If Jaeger is down the exporter drops spans quietly; requests are never affected.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: none
+  OTEL_LOGS_EXPORTER: none
+  OTEL_BSP_SCHEDULE_DELAY: "1000"   # flush every 1 s so a demo trace shows up in Jaeger quickly
+
 x-pg-health: &pg-health
   test: ["CMD-SHELL", "pg_isready -U postgres"]
   interval: 5s
@@ -71,7 +81,8 @@ services:
       context: ./services/notifications
       target: runtime
     environment:
-      <<: [*shared-env, *keycloak-env]
+      <<: [*shared-env, *keycloak-env, *otel-env]
+      OTEL_SERVICE_NAME: notifications
       JWT_AUDIENCE: notifications-api
       DATABASE_URL: postgres://postgres:postgres@notif-db:5432/notif_db
       AMQP_URL: amqp://guest:guest@rabbitmq:5672
@@ -85,7 +96,8 @@ services:
       context: ./services/payments
       target: runtime
     environment:
-      <<: [*shared-env, *keycloak-env]
+      <<: [*shared-env, *keycloak-env, *otel-env]
+      OTEL_SERVICE_NAME: payments
       JWT_AUDIENCE: payments-api
       DATABASE_URL: postgres://postgres:postgres@pay-db:5432/pay_db
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-edemand-webhook-secret}
