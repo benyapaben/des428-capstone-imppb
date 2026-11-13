@@ -9,10 +9,11 @@ import { config } from "#lib/config.js";
 import { UnauthorizedError } from "#lib/errors.js";
 import { receiveEvent } from "#lib/outbox/inbound.js";
 
-// Service-to-service event delivery INTO the monolith (Step 2 transport; RabbitMQ in Step 4).
-// Authenticated by the shared internal token, never by a user JWT, and blocked at the nginx gateway
-// so a browser can never reach it. Always 200 for a valid event — including a duplicate — so the
-// sender stops retrying.
+// HTTP entry point for events INTO the monolith, left over from the Step 2 transport. Since Step 4
+// no relay calls it: live events arrive through the booking.events RabbitMQ consumer, which runs the
+// same receiveEvent(). Kept because tests drive receiveEvent() through it. Authenticated by the
+// shared internal token, never by a user JWT, and blocked at the nginx gateway so a browser can never
+// reach it. Always 200 for a valid event — including a duplicate.
 const schema = z.object({
   source: z.string().min(1),
   id: z.coerce.number().int().positive(),

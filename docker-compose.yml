@@ -87,7 +87,6 @@ services:
       JWT_AUDIENCE: payments-api
       DATABASE_URL: postgres://postgres:postgres@pay-db:5432/pay_db
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-edemand-webhook-secret}
-      EVENT_SUBSCRIBERS: http://edemand:3000/api/internal/events,http://notifications:4001/internal/events
       SEED_PROVIDER_IDS: "1,2,3"
       AMQP_URL: amqp://guest:guest@rabbitmq:5672
     depends_on:

@@ -66,7 +66,10 @@ test("saga: payment timeout and late payment", async (t) => {
     receiveEvent(paymentEvent("payment.succeeded", { order_id: id }));
     assert.equal(orderRow(id).payment_status, "paid");
 
-    assert.equal(expireUnpaidOrders(afterTimeout()), 0);
+    // The sweep covers EVERY unpaid gateway order in the shared DB (e.g. the one re-booked above),
+    // so assert on this order only, not on the sweep's total count.
+    expireUnpaidOrders(afterTimeout());
+    assert.equal(cancelledEvents(id).length, 0, "no booking.cancelled for a paid order");
     assert.equal(orderRow(id).status, "awaiting");
     assert.ok(holds(id) > 0);
   });
