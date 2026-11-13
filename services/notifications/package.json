@@ -8,10 +8,17 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --import ./src/otel.js src/server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.223.2",
+    "@opentelemetry/instrumentation": "0.223.2",
+    "@opentelemetry/instrumentation-express": "0.71.0",
+    "@opentelemetry/instrumentation-http": "0.223.2",
+    "@opentelemetry/instrumentation-pg": "0.76.0",
+    "@opentelemetry/sdk-node": "0.223.2",
     "amqplib": "^0.10.4",
     "express": "4.21.2",
     "jose": "5.10.0",

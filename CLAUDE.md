@@ -171,6 +171,22 @@ scraping being down must never fail a request. Grafana logs `plugin xychart is a
 boot: a harmless Grafana 11.3 bug. Its Jaeger datasource "health" API says *Plugin unavailable* because
 that datasource runs in the browser; use Explore, or `/api/datasources/proxy/uid/jaeger/api/services`.
 
+**Tracing in the services (Step 6 / E2).** Both services start with
+`node --import ./src/otel.js src/server.js` (Dockerfile `CMD` and `npm start`). `src/otel.js` — identical
+in both services, keep it that way — registers OpenTelemetry's ESM loader hook (our code *imports*
+express/pg, which a require-hook never sees) and starts the NodeSDK with the http, express and pg
+instrumentations. Settings are the standard `OTEL_*` variables from the `x-otel-env` block in
+`docker-compose.yml` (plus `OTEL_SERVICE_NAME` per service); `OTEL_SDK_DISABLED=true` turns it off.
+`/health` and `/metrics` are not traced, and pg spans need a parent (`requireParentSpan`) so the
+once-a-second outbox poll does not create a trace per tick. Tests import `src/app.js` directly and
+never load `otel.js`. amqplib is deliberately **not** auto-instrumented: trace context crosses
+RabbitMQ through the outbox and message headers (E4).
+
+**OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
+1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0. From
+SDK 0.300 on they require Node ≥ 22.15 — do not bump them without moving every Dockerfile and
+`.nvmrc` to Node 22.
+
 **Always pass `--build`.** There is no source bind-mount (only `gateway/nginx.conf` is mounted):
 each Dockerfile `COPY`s the source into the image at build time. Without `--build`, an existing image
 is reused and the container silently runs the **pre-edit code**. `edemand` is a production
@@ -515,6 +531,11 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
 - The product name changed (eDemand → Bangkok Homeservice) **only** course-facing. Identifiers, the
   DB file (`data/edemand.db`), the cookie (`edemand_token`), and the package names still say
   `edemand` — leave them alone.
+- **Gateway 502 after rebuilding a service.** nginx resolves `edemand` / `payments` / `notifications`
+  to container IPs once, at its own start. `docker compose up -d --build payments` recreates the
+  container with a new IP and the gateway keeps proxying to the old one (`connect() failed (111:
+  Connection refused)` in its log → 502). Fix: `docker compose restart gateway` after recreating any
+  upstream (or bring the whole stack down and up).
 - **Do not run `npm audit fix --force`.** `npm audit` reports advisories (critical `next`; high
   `nanoid`/`postcss`/`source-map-js`/`zod`; moderate `uuid`). The deps are pinned on purpose as the
   course baseline, and `--force` would bump `next`, `zod`, `postcss` and `uuid` across majors — zod 4
