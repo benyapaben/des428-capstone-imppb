@@ -165,10 +165,13 @@ if [ "$routed" != true ]; then
   fail "DLQ: publish a poison booking.completed" "broker did not route it (routed=$routed)"
 else
   in_dlq()  { [ "$(qcount payments.events.dlq)" -ge $((dlq0 + 1)) ]; }
-  if wait_for 60 in_dlq && wait_for 30 drained; then
+  # Each delivery is first retried in-process (~15.5 s with the default CONSUMER_RETRIES /
+  # CONSUMER_RETRY_BASE_MS) before it goes back to the broker, so with x-delivery-limit 3 a poison
+  # message needs about a minute to reach the DLQ.
+  if wait_for 120 in_dlq && wait_for 30 drained; then
     pass "DLQ: poison message dead-lettered, queue not blocked" "payments.events.dlq = $(qcount payments.events.dlq)"
   else
-    fail "DLQ: poison message did not reach payments.events.dlq within 60 s"
+    fail "DLQ: poison message did not reach payments.events.dlq within 120 s"
   fi
 fi
 

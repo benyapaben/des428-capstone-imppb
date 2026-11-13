@@ -13,5 +13,14 @@ export const config = Object.freeze({
     `${process.env.KEYCLOAK_ISSUER || "http://localhost:8081/realms/edemand"}/protocol/openid-connect/certs`,
   jwtAudience: process.env.JWT_AUDIENCE || "notifications-api",
   internalToken: process.env.INTERNAL_TOKEN || "edemand-internal-token",
-  logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"), amqpUrl: process.env.AMQP_URL || "amqp://guest:guest@localhost:5672",
+  logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"),
+  // Step 4: the consumer reads notification-worthy events from RabbitMQ.
+  amqpUrl: process.env.AMQP_URL || "amqp://guest:guest@localhost:5672",
+  // RabbitMQ resilience: a publish with no broker confirm after publishTimeoutMs fails (the relay retries
+  // it next tick); a consumer retries a failing handler consumerRetries times, waiting consumerRetryBaseMs
+  // doubled each time (~15.5 s with the defaults), before handing the message back to the broker.
+  publishTimeoutMs: parseInt(process.env.PUBLISH_TIMEOUT_MS, 10) || 5000,
+  // 0 is allowed (no in-process retry); empty or invalid falls back to 5 rather than silently to 0.
+  consumerRetries: /^\d+$/.test(process.env.CONSUMER_RETRIES ?? "") ? Number(process.env.CONSUMER_RETRIES) : 5,
+  consumerRetryBaseMs: parseInt(process.env.CONSUMER_RETRY_BASE_MS, 10) || 500,
 });

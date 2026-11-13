@@ -7,7 +7,7 @@ import { getPool } from "./db.js";
 import * as repository from "./repository.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
-import { getPublisher, publish } from "./amqp.js";
+import { getPublisher, publish, dropPublisher } from "./amqp.js";
 
 export const SOURCE = "payments";
 let busy = false;
@@ -26,7 +26,8 @@ export function toEnvelope(row) {
 }
 
 
-export async function runRelayOnce({ publisher } = {}) {
+// `publisher` / `publishTimeoutMs` let tests inject a fake channel and a short confirm timeout.
+export async function runRelayOnce({ publisher, publishTimeoutMs } = {}) {
   if (busy) return 0;
   busy = true;
   let published = 0;
@@ -35,9 +36,10 @@ export async function runRelayOnce({ publisher } = {}) {
     for (const row of await repository.listUnpublished(db, 100)) {
       const envelope = toEnvelope(row);
       try {
-        await publish(publisher ?? (await getPublisher()), envelope);
+        await publish(publisher ?? (await getPublisher()), envelope, { timeoutMs: publishTimeoutMs });
       } catch (err) {
         logger.warn({ err: err.message, eventId: row.id, type: row.type }, "relay: delivery failed, will retry");
+        if (!publisher) dropPublisher(); // a failed or timed-out channel is not reused next tick
         break;
       }
       published += await repository.markPublished(db, row.id);

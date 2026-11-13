@@ -142,6 +142,7 @@ docker compose --profile test run --rm --build payments-test        # real Postg
 bash deploy/keycloak/step3-evidence.sh   # stack must be up; real Keycloak tokens -> 200/401 table, ~70 s
 PAYMENT_TIMEOUT_SECONDS=30 docker compose up -d --build --wait     # short saga timeout for the demo ...
 PAYMENT_TIMEOUT_SECONDS=30 bash deploy/rabbitmq/step4-evidence.sh  # ... then RabbitMQ / DLQ / saga evidence, ~2-3 min
+bash deploy/rabbitmq/amqp-robustness-evidence.sh   # consumers survive a broker restart mid-delivery + a DB blip, ~1-2 min
 docker compose down -v
 ```
 
@@ -150,6 +151,12 @@ succeeds while RabbitMQ is stopped and its events arrive after the restart, a po
 `payments.events.dlq`, and an unpaid gateway booking is cancelled by the saga timeout (that case is
 SKIPped unless the stack was started with a short `PAYMENT_TIMEOUT_SECONDS`); exit 0 = all PASS.
 `SKIP_OUTAGE=1` skips the stop/start case.
+
+`amqp-robustness-evidence.sh` checks the consumer hardening: with both service DBs paused (handlers
+hang), RabbitMQ is restarted and the DBs resumed, so the handlers ack on closed channels — payments and
+notifications must stay up and the events still be processed; then pay-db is stopped for a few seconds
+while `booking.cancelled` arrives — it must be processed once the DB is back and nothing dead-lettered.
+It pauses/stops containers itself; exit 0 = all PASS.
 
 `step3-evidence.sh` is the Step 3 done-when evidence (forged / expired / wrong-audience tokens → 401
 on both services, through the gateway); exit 0 = all PASS. Its recorded output and the rest of the
@@ -347,6 +354,8 @@ Nothing is durable; recreate both together (`docker compose down` / `up`).
   Step 4 removed `EVENT_SUBSCRIBERS` (HTTP delivery is gone) and added `AMQP_URL` (all three
   processes; default `amqp://guest:guest@localhost:5672`), plus, in the monolith,
   `PAYMENT_TIMEOUT_SECONDS` (default 900) and `SWEEP_INTERVAL_MS` (default 5000) for the saga timeout.
+  The RabbitMQ hardening added, to all three processes, `PUBLISH_TIMEOUT_MS` (default 5000),
+  `CONSUMER_RETRIES` (default 5) and `CONSUMER_RETRY_BASE_MS` (default 500).
 
 ### Concurrency idioms — do not regress these
 
@@ -417,8 +426,16 @@ dead-letter queue `<queue>.dlq`. Changing a queue argument makes RabbitMQ reject
 (`PRECONDITION_FAILED`) — recreate the broker with `docker compose down -v` after editing the topology.
 
 **Consumers** use `startConsumer(queue, handle, log)` (also in each `amqp.js`): `prefetch(10)`, manual
-ack **after** `handle` has committed its DB transaction; a throw is a `nack` with requeue, and once the
-delivery limit is exceeded the broker moves the message to the `.dlq`. It reconnects every 2 s. Wiring:
+ack **after** `handle` has committed its DB transaction. Each delivery goes through `handleDelivery()`:
+a throwing handler is first retried **in-process** (`CONSUMER_RETRIES` times, backoff
+`CONSUMER_RETRY_BASE_MS` doubling, ~15.5 s by default) so a brief DB outage does not spend the delivery
+limit; only then is it `nack`ed with requeue, and once the delivery limit is exceeded the broker moves
+it to the `.dlq`. Unparseable JSON is dead-lettered at once. `ack`/`nack` on a channel that closed in the
+meantime are logged, never thrown (the broker redelivers, the inbox dedupes). Losing the connection or
+just the channel, or a broker-cancelled consumer, closes the connection and reconnects once after 2 s.
+The relay's `publish()` fails after `PUBLISH_TIMEOUT_MS` without a confirm, and a failed publish drops
+the cached publisher so the next tick reconnects — except while the broker has the connection
+`blocked` (memory/disk alarm), when the channel is kept. Wiring:
 monolith `lib/outbox/consumer.js` → `receiveEvent()` (`lib/outbox/inbound.js`, synchronous transaction),
 Payments `src/consumer.js` → `service.handleEvent`, Notifications `src/consumer.js` →
 `service.handleEvent`. Never `await` inside the monolith's SQLite transaction.
@@ -517,8 +534,13 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   and every process fails with `PRECONDITION_FAILED` until the broker is recreated
   (`docker compose down -v`). (2) Management-UI / API counters refresh about every 5 s — poll, don't
   read once (the evidence script does). (3) After a broker restart the exchange's counters start from 0.
-  (4) A poison message (handler always throws) is retried by redelivery and then dead-lettered; inspect
-  `*.dlq` in the UI, nothing replays them automatically.
+  (4) A poison message (handler always throws) is retried in-process, then by redelivery, and then
+  dead-lettered — `x-delivery-limit: 3` means 4 deliveries, so with the defaults about 4 × 15.5 s
+  (~1 min); inspect `*.dlq` in the UI, nothing
+  replays them automatically. (5) `lib/amqp/connection.js` is copied verbatim into
+  `services/{payments,notifications}/src/amqp.js` (only the config import differs) — change all three;
+  `test/amqp-copies.test.js` fails if they drift. (6) Each service's `pg.Pool` needs its `'error'`
+  listener (`src/db.js`): without it a Postgres restart kills the process.
 - **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway, Step 3
   (Keycloak, per-service JWT verification, ownership, BOLA) and Step 4 (outbox, RabbitMQ, idempotent
   consumers, DLQ, saga) are done; the team still adds resilience — timeouts, retries, fault switches
