@@ -1,0 +1,19 @@
+# Step 6 / Area E (E1): datasources are provisioned from the repo, so a clean clone opens Grafana
+# with Prometheus and Jaeger already connected. Fixed uids let dashboard JSON (E6) refer to them.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false

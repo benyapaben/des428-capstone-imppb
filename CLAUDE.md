@@ -161,6 +161,16 @@ extracted routes don't exist there). Compose services: `gateway`, `edemand`, `no
 `payments`, `notif-db`, `pay-db`, `keycloak` (:8081), `rabbitmq` (:5672, UI :15672), plus the `test` profile (`test`, `test-db`,
 `notifications-test`, `payments-test`). `deploy/test-db-init.sql` creates `notif_test` / `pay_test`.
 
+Observability (Step 6, configs in `deploy/observability/`): `jaeger` (UI :16686; apps send OTLP/HTTP to
+`http://jaeger:4318`, no OTel Collector), `prometheus` (:9090, scrapes `edemand:3000/api/metrics`,
+`payments:4002/metrics`, `notifications:4001/metrics` — those targets stay DOWN until the apps expose
+`/metrics`), `grafana` (:3001, admin / admin, anonymous Viewer; Prometheus + Jaeger datasources are
+provisioned with uids `prometheus` / `jaeger`, dashboards load from
+`deploy/observability/grafana/dashboards/*.json`). None of them is a `depends_on` of an app — tracing or
+scraping being down must never fail a request. Grafana logs `plugin xychart is already registered` on
+boot: a harmless Grafana 11.3 bug. Its Jaeger datasource "health" API says *Plugin unavailable* because
+that datasource runs in the browser; use Explore, or `/api/datasources/proxy/uid/jaeger/api/services`.
+
 **Always pass `--build`.** There is no source bind-mount (only `gateway/nginx.conf` is mounted):
 each Dockerfile `COPY`s the source into the image at build time. Without `--build`, an existing image
 is reused and the container silently runs the **pre-edit code**. `edemand` is a production
