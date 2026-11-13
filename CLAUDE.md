@@ -434,7 +434,8 @@ it to the `.dlq`. Unparseable JSON is dead-lettered at once. `ack`/`nack` on a c
 meantime are logged, never thrown (the broker redelivers, the inbox dedupes). Losing the connection or
 just the channel, or a broker-cancelled consumer, closes the connection and reconnects once after 2 s.
 The relay's `publish()` fails after `PUBLISH_TIMEOUT_MS` without a confirm, and a failed publish drops
-the cached publisher so the next tick reconnects. Wiring:
+the cached publisher so the next tick reconnects — except while the broker has the connection
+`blocked` (memory/disk alarm), when the channel is kept. Wiring:
 monolith `lib/outbox/consumer.js` → `receiveEvent()` (`lib/outbox/inbound.js`, synchronous transaction),
 Payments `src/consumer.js` → `service.handleEvent`, Notifications `src/consumer.js` →
 `service.handleEvent`. Never `await` inside the monolith's SQLite transaction.
@@ -534,7 +535,8 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   (`docker compose down -v`). (2) Management-UI / API counters refresh about every 5 s — poll, don't
   read once (the evidence script does). (3) After a broker restart the exchange's counters start from 0.
   (4) A poison message (handler always throws) is retried in-process, then by redelivery, and then
-  dead-lettered — with the defaults that takes about 3 × 15.5 s; inspect `*.dlq` in the UI, nothing
+  dead-lettered — `x-delivery-limit: 3` means 4 deliveries, so with the defaults about 4 × 15.5 s
+  (~1 min); inspect `*.dlq` in the UI, nothing
   replays them automatically. (5) `lib/amqp/connection.js` is copied verbatim into
   `services/{payments,notifications}/src/amqp.js` (only the config import differs) — change all three;
   `test/amqp-copies.test.js` fails if they drift. (6) Each service's `pg.Pool` needs its `'error'`

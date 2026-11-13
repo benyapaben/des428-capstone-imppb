@@ -113,6 +113,16 @@ test("handleDelivery: after every retry fails the message is nacked back to the 
   assert.deepEqual(ch.calls, [["nack", true]]);
 });
 
+test("handleDelivery: once the channel is gone, retries stop and nothing is acked or nacked", async () => {
+  const ch = fakeAckChannel();
+  let calls = 0;
+  let open = true;
+  await handleDelivery(ch, msgOf(envelope), async () => { calls += 1; open = false; throw new Error("db down"); },
+    recordingLog(), { retries: 5, wait: noWait, isOpen: () => open });
+  assert.equal(calls, 1, "no further attempts: the broker is redelivering this message to the new consumer");
+  assert.deepEqual(ch.calls, []);
+});
+
 test("handleDelivery: unparseable JSON is dead-lettered at once, the handler never runs", async () => {
   const ch = fakeAckChannel();
   let calls = 0;
@@ -171,6 +181,18 @@ test("getPublisher: a closed channel is forgotten, so the next call reconnects",
   dropPublisher();
 });
 
+test("getPublisher: while the broker blocks the connection, a failed publish does not drop it", async () => {
+  const { connect, made } = connector();
+  const ch = await getPublisher({ connect });
+  made[0].emit("blocked", "memory alarm");
+  dropPublisher();                                           // what the relay does after a publish timeout
+  assert.equal(made[0].closed, false, "no close() on a blocked connection (it would never complete)");
+  assert.equal(await getPublisher({ connect }), ch, "the same channel is reused; no new connection per tick");
+  made[0].emit("unblocked");
+  dropPublisher();
+  assert.equal(made[0].closed, true, "once unblocked, a failed publish drops it as usual");
+});
+
 // ------------------------------------------------------------------ startConsumer (G1, G3)
 
 test("startConsumer: a cancelled consumer (msg === null) reconnects", async () => {
@@ -195,6 +217,18 @@ test("startConsumer: a failed setup closes that connection and schedules exactly
   await new Promise((r) => setTimeout(r, 40));
   assert.equal(made[0].closed, true, "the failed connection is not leaked");
   assert.equal(made.length, 2, "its close event did not start a second consumer loop");
+});
+
+test("startConsumer: with the configured defaults, a briefly failing handler is retried and acked", async () => {
+  // No `delivery` override: retries and backoff come from config (CONSUMER_RETRIES / _BASE_MS).
+  const { connect, made } = connector();
+  let calls = 0;
+  await startConsumer("payments.events", async () => { calls += 1; if (calls === 1) throw new Error("db blip"); },
+    recordingLog(), { connect, retryDelayMs: 5 });
+  made[0].channel.onMessage(msgOf(envelope));
+  await until(() => made[0].channel.acks.length === 1, 3000);
+  assert.equal(calls, 2);
+  assert.equal(made[0].channel.acks[0][0], "ack");
 });
 
 test("startConsumer: the channel closing while a handler runs causes no unhandled rejection (G1)", async () => {
