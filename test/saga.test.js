@@ -58,11 +58,6 @@ test("saga: payment timeout and late payment", async (t) => {
 
     const again = await place("09:00");
     assert.equal(again.status, 201, "the released slot can be booked again");
-
-    // Pay the re-booked order: expireUnpaidOrders() sweeps EVERY unpaid gateway order, so leaving it
-    // unpaid would make the next subtest's sweep cancel it and count 1 instead of 0.
-    receiveEvent(paymentEvent("payment.succeeded", { order_id: again.body.order.id }));
-    assert.equal(orderRow(again.body.order.id).payment_status, "paid");
   });
 
   await t.test("a PAID booking is never expired", async () => {
@@ -71,7 +66,10 @@ test("saga: payment timeout and late payment", async (t) => {
     receiveEvent(paymentEvent("payment.succeeded", { order_id: id }));
     assert.equal(orderRow(id).payment_status, "paid");
 
-    assert.equal(expireUnpaidOrders(afterTimeout()), 0);
+    // The sweep covers EVERY unpaid gateway order in the shared DB (e.g. the one re-booked above),
+    // so assert on this order only, not on the sweep's total count.
+    expireUnpaidOrders(afterTimeout());
+    assert.equal(cancelledEvents(id).length, 0, "no booking.cancelled for a paid order");
     assert.equal(orderRow(id).status, "awaiting");
     assert.ok(holds(id) > 0);
   });
