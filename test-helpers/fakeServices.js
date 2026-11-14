@@ -4,6 +4,10 @@
 // RabbitMQ: the real relay publishes into it (with confirms) and `consume()` plays a consumer,
 // redelivering failed messages and dead-lettering them after 3 tries. Tests flip `fake.paymentsDown`,
 // `fakeBroker.down` and `fakeKeycloak.down` to exercise the failure paths (compensation, relay retry).
+// Step 5 fault switches on the fake POST /intents, each counting down one call at a time:
+//   fake.failNextCalls  the call fails before anything is stored (service down)
+//   fake.loseReplies    the intent is stored, then the reply is lost
+//   fake.slowReplies    the intent is stored, then the reply never comes before the caller's timeout
 import { randomUUID } from "node:crypto";
 import { fakeKeycloak, handleKeycloak } from "./fakeKeycloak.js";
 import { QUEUES } from "../lib/amqp/connection.js";
@@ -55,10 +59,14 @@ export const fakeBroker = {
 
 export const fake = {
   paymentsDown: false,
+  failNextCalls: 0,
+  loseReplies: 0,
+  slowReplies: 0,
   intents: new Map(),          // Idempotency-Key -> intent
-  intentCalls: [],             // every POST /intents { headers, body }
+  intentCalls: [],             // every POST /intents that reached the fake { headers, body }
   reset() {
     this.paymentsDown = false;
+    this.failNextCalls = this.loseReplies = this.slowReplies = 0;
     this.intents.clear();
     this.intentCalls.length = 0;
     fakeBroker.reset();
@@ -83,21 +91,49 @@ globalThis.fetch = async (input, init = {}) => {
     if (fake.paymentsDown) throw new TypeError("fetch failed");
     const body = JSON.parse(init.body);
     fake.intentCalls.push({ headers, body });
+    if (fake.failNextCalls > 0) {
+      fake.failNextCalls -= 1;
+      throw new TypeError("fetch failed");
+    }
     const key = headers.get("idempotency-key");
-    if (fake.intents.has(key)) return reply(200, fake.intents.get(key));
-    const intent = {
-      id: fake.intents.size + 1,
-      order_id: body.order_id,
-      amount_cents: body.amount_cents,
-      customer_id: body.customer_id,
-      provider_id: body.provider_id,
-      gateway_ref: `SIM-PI-${randomUUID()}`,
-      status: "requires_payment",
-    };
-    fake.intents.set(key, intent);
-    return reply(201, intent);
+    const existing = fake.intents.get(key);
+    const result = existing ? reply(200, existing) : reply(201, storeIntent(key, body));
+    if (fake.loseReplies > 0) {
+      fake.loseReplies -= 1;
+      throw new TypeError("fetch failed: other side closed");     // written, but the reply is lost
+    }
+    if (fake.slowReplies > 0) {
+      fake.slowReplies -= 1;
+      await abortedBy(init.signal);                                // written, but too slow to answer
+    }
+    return result;
   }
-
 
   return realFetch(input, init);
 };
+
+function storeIntent(key, body) {
+  const intent = {
+    id: fake.intents.size + 1,
+    order_id: body.order_id,
+    amount_cents: body.amount_cents,
+    customer_id: body.customer_id,
+    provider_id: body.provider_id,
+    gateway_ref: `SIM-PI-${randomUUID()}`,
+    status: "requires_payment",
+  };
+  fake.intents.set(key, intent);
+  return intent;
+}
+
+// Never resolves on its own: rejects with the signal's reason once the caller's timeout fires.
+// AbortSignal.timeout() uses an unref'd timer, so a ref'd keep-alive holds the event loop open
+// meanwhile; without it node:test sees an idle loop and cancels the test.
+function abortedBy(signal) {
+  return new Promise((_, reject) => {
+    if (!signal) return;                                           // no timeout: hang like a dead peer
+    if (signal.aborted) return reject(signal.reason);
+    const keepAlive = setInterval(() => {}, 1000);
+    signal.addEventListener("abort", () => { clearInterval(keepAlive); reject(signal.reason); }, { once: true });
+  });
+}

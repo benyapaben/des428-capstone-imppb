@@ -12,6 +12,11 @@ process.env.DB_PATH = ":memory:";
 // Set synchronously, before the first await, like NODE_ENV above.
 process.env.PAYMENTS_URL = "http://payments.test";
 process.env.NOTIFICATIONS_URL = "http://notifications.test";
+// Step 5: keep the POST /intents timeout and retry backoff short so fault tests stay fast.
+// PAYMENTS_MAX_RETRIES keeps its default (test/resilience.test.js reads config.paymentsMaxRetries).
+process.env.PAYMENTS_TIMEOUT_MS = "50";
+process.env.PAYMENTS_BACKOFF_BASE_MS = "1";
+process.env.PAYMENTS_BACKOFF_CAP_MS = "5";
 // Step 3: Keycloak is faked too (fakeKeycloak.js). The issuer keeps the real pinned value; only the
 // URL the monolith calls (token endpoint, JWKS, admin API) points at the fake.
 process.env.KEYCLOAK_URL = "http://keycloak.test";
