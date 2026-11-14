@@ -60,6 +60,16 @@ export function sql(text, params) {
   return getPool().query(text, params).then((r) => r.rows);
 }
 
+// For concurrency tests: open n pooled connections up front so n requests really overlap. A cold
+// pool opens connections in parallel, but their handshakes finish at different times, so "concurrent"
+// requests reach Postgres staggered and a race test can pass against a broken guard. n must not
+// exceed the pool's max, or the extra requests queue for a connection and run after the others.
+export async function warmPool(n) {
+  const pool = getPool();
+  if (n > pool.options.max) throw new Error(`warmPool(${n}) exceeds the pool max (${pool.options.max})`);
+  await Promise.all(Array.from({ length: n }, () => pool.query("SELECT pg_sleep(0.05)")));
+}
+
 export function createIntent(base, body, { key = String(body.order_id), token = config.internalToken } = {}) {
   return request(base, "/intents", { body, headers: { "x-internal-token": token, "idempotency-key": key } });
 }

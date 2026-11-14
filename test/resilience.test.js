@@ -30,6 +30,8 @@ test("booking -> payments resilience", async (t) => {
   const provider = await loginSeededProvider("sparkle@example.com");
   const addressId = getDb().prepare("SELECT id FROM addresses WHERE customer_id = ? LIMIT 1").get(customer.id).id;
   const date = futureWeekday(3);
+  // Service 2 takes 90 minutes, so each booking starts at least 2 h after the previous one; overlapping
+  // starts would collide on slot_holds (409) before the payment call is even made.
   const place = (starting_time) =>
     call(bookings.POST, {
       token: customer.token,
@@ -59,7 +61,7 @@ test("booking -> payments resilience", async (t) => {
   await t.test("fault 2: reply slower than the timeout -> retried, saved exactly once", async () => {
     fake.reset();
     fake.slowReplies = 1;
-    const res = await place("10:00");
+    const res = await place("11:00");
     assertSingleIntent(res);
     assert.equal(fake.intentCalls.length, 2);
   });
@@ -67,7 +69,7 @@ test("booking -> payments resilience", async (t) => {
   await t.test("fault 3a: a short outage is ridden out by the retries", async () => {
     fake.reset();
     fake.failNextCalls = config.paymentsMaxRetries;
-    const res = await place("11:00");
+    const res = await place("13:00");
     assertSingleIntent(res);
     assert.equal(fake.intentCalls.length, config.paymentsMaxRetries + 1);
   });
@@ -76,7 +78,7 @@ test("booking -> payments resilience", async (t) => {
     fake.reset();
     fake.failNextCalls = 1000;
     const id = maxOrderId() + 1;
-    const res = await place("12:00");
+    const res = await place("15:00");
     const attempts = fake.intentCalls.length;
     assert.equal(fake.intents.size, 0, "no intent was ever stored");
     fake.reset();
@@ -89,7 +91,7 @@ test("booking -> payments resilience", async (t) => {
       count("SELECT COUNT(*) AS n FROM events WHERE type = 'booking.cancelled' AND aggregate_id = ?", id), 1,
       "Payments is told to void any intent it may have created"
     );
-    const again = await place("12:00");
+    const again = await place("15:00");
     assert.equal(again.status, 201, "the released slot can be booked again once Payments is back");
   });
 });

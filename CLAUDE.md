@@ -18,8 +18,14 @@ tests in the services, and curl evidence — summarised in `docs/step3-security-
 Step 4 (Area C, outbox / RabbitMQ / saga) is **done**: both relays publish to RabbitMQ with publisher
 confirms, every consumer is idempotent (`processed_messages`), failing messages are dead-lettered, and
 Booking runs the payment-timeout / late-payment saga — see the README's "Step 4" section and the
-"Outbox + relay + RabbitMQ" section below. Steps 5–6 (Areas D, E) belong to other owners — check open
-PRs before assuming their status.
+"Outbox + relay + RabbitMQ" section below. Step 5 (Area D, resilience) is **done** (README "Step 5" section,
+`docs/step5-resilience-evidence.md`): `POST /intents`
+has a per-attempt timeout and retries with jittered backoff, and Payments has the three fault switches
+(`/internal/faults`). The race demo (STEPS.md 5.3, wallet credited twice when `booking.completed` is
+delivered concurrently) is a broken-then-fixed commit pair in the Step 5 PR, guarded by
+`services/payments/test/race.test.js`. The PR is squash-merged, so the broken commit is not on `main`:
+see it in the PR's commit list, or `git fetch origin pull/<PR number>/head`. Step 6 (Area E) belongs to
+another owner — check open PRs before assuming its status.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -143,6 +149,7 @@ bash deploy/keycloak/step3-evidence.sh   # stack must be up; real Keycloak token
 PAYMENT_TIMEOUT_SECONDS=30 docker compose up -d --build --wait     # short saga timeout for the demo ...
 PAYMENT_TIMEOUT_SECONDS=30 bash deploy/rabbitmq/step4-evidence.sh  # ... then RabbitMQ / DLQ / saga evidence, ~2-3 min
 bash deploy/rabbitmq/amqp-robustness-evidence.sh   # consumers survive a broker restart mid-delivery + a DB blip, ~1-2 min
+bash deploy/step5-evidence.sh                      # Step 5: faults 1-3 on POST /intents + the 5.3 race, ~30 s
 docker compose down -v
 ```
 
@@ -151,6 +158,13 @@ succeeds while RabbitMQ is stopped and its events arrive after the restart, a po
 `payments.events.dlq`, and an unpaid gateway booking is cancelled by the saga timeout (that case is
 SKIPped unless the stack was started with a short `PAYMENT_TIMEOUT_SECONDS`); exit 0 = all PASS.
 `SKIP_OUTAGE=1` skips the stop/start case.
+
+`step5-evidence.sh` is the Step 5 evidence: the fault switch is not reachable through the gateway; a
+gateway booking survives fault 1 (reply cut) and fault 2 (reply later than the timeout) with exactly one
+intent; under fault 3 (down) it gets 503 after 3 retries, the order is compensated and the slot can be
+booked again; and 10 copies of one `booking.completed` handled at once credit the wallet once (it warms
+Payments' pool and pauses the payments container for ~1 s to make them race). It sets and always clears
+the faults itself; exit 0 = all PASS. Its recorded output is in `docs/step5-resilience-evidence.md`.
 
 `amqp-robustness-evidence.sh` checks the consumer hardening: with both service DBs paused (handlers
 hang), RabbitMQ is restarted and the DBs resumed, so the handlers ack on closed channels — payments and
@@ -356,6 +370,11 @@ Nothing is durable; recreate both together (`docker compose down` / `up`).
   `PAYMENT_TIMEOUT_SECONDS` (default 900) and `SWEEP_INTERVAL_MS` (default 5000) for the saga timeout.
   The RabbitMQ hardening added, to all three processes, `PUBLISH_TIMEOUT_MS` (default 5000),
   `CONSUMER_RETRIES` (default 5) and `CONSUMER_RETRY_BASE_MS` (default 500).
+  Step 5 added, in the monolith, `PAYMENTS_TIMEOUT_MS` (default 2000), `PAYMENTS_MAX_RETRIES` (3),
+  `PAYMENTS_BACKOFF_BASE_MS` (200) and `PAYMENTS_BACKOFF_CAP_MS` (2000) for `POST /intents`, and, in
+  Payments, the fault switches `FAULT_DROP_REPLIES`, `FAULT_DELAY_REPLIES`, `FAULT_DELAY_MS` and
+  `FAULT_DOWN_MS` (all default 0 = off). New integer settings use `intEnv()`: 0 is accepted, an empty or
+  malformed value falls back to the default.
 
 ### Concurrency idioms — do not regress these
 
@@ -373,9 +392,14 @@ The whole point of several modules is that they are race-free. When touching the
 - **`placeBooking` = one `.immediate()` transaction, then a sync call.** The transaction holds
   order + items + slot_holds + outbox event (a clash leaves zero partial rows). Only after it commits
   does a gateway booking call `POST /intents` (`Idempotency-Key = order_id`) and store
-  `gateway_ref` on the order. If Payments is unreachable the order is **cancelled again
+  `gateway_ref` on the order. The call (`lib/clients/payments.js#createIntent`) cuts each attempt off
+  after `PAYMENTS_TIMEOUT_MS` and retries a network error, timeout or 5xx up to `PAYMENTS_MAX_RETRIES`
+  times with full-jitter backoff (`backoffDelay`), always with the same `Idempotency-Key`, so a reply
+  that was lost or late after the intent was written makes the retry get that intent back (200), not a
+  second one; a 4xx is not retried. Only if every attempt fails is the order **cancelled again
   (compensation, `reason: "payment_unavailable"`)** — releasing its slots and emitting
-  `booking.cancelled` so Payments voids any intent it did create — and the caller gets **503**.
+  `booking.cancelled` so Payments voids any intent it did create — and the caller gets **503**
+  (worst case about 4 × 2 s plus backoff).
 - **Idempotency**: `withIdempotency()` (`lib/db/idempotency.js`) replays a stored `{statusCode, body}`.
   Keys are scoped to the actor (`${actor}:${key}`). Used by `POST /api/bookings`. A replay of a
   gateway booking that already has `gateway_ref` does not call Payments again.
@@ -467,7 +491,10 @@ App Router route handlers and calls them in-process**. Conventions that matter:
 - **The extracted services are faked in-process** by `test-helpers/fakeServices.js`, which
   replaces `globalThis.fetch`: `POST http://payments.test/intents` is answered locally; anything else
   falls through to the real fetch. Flip `fake.paymentsDown` to exercise compensation; inspect
-  `fake.intentCalls`; call `fake.reset()` between scenarios.
+  `fake.intentCalls`; call `fake.reset()` between scenarios. Step 5 fault switches count down one call
+  each: `fake.failNextCalls` (fails before storing), `fake.loseReplies` (stores, then the reply is lost)
+  and `fake.slowReplies` (stores, then answers only after the caller's timeout). `boot.js` sets a 50 ms
+  `PAYMENTS_TIMEOUT_MS` and a tiny backoff so these stay fast (`test/resilience.test.js`).
 - **RabbitMQ is faked the same way** by `fakeBroker` (same file, re-exported from `boot.js`):
   `fakeBroker.channel.publish` has amqplib's confirm-channel signature, so the real relay and
   `publish()` run unchanged; `fakeBroker.down = true` simulates an outage; `fakeBroker.published` /
@@ -504,6 +531,15 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   `forgedToken` / `expiredToken` / `wrongAudienceToken` / `hs256Token` build the ones that must 401.
 - The Payments relay test passes its own fake `publisher` (a `publish(exchange, key, content, options,
   cb)` object) to `runRelayOnce`; no RabbitMQ is needed for any service test.
+- **Payments fault switches (Step 5)** — `src/faults.js`, driven by `GET` / `POST` / `DELETE
+  /internal/faults` (internal token; not routed by the gateway) or the `FAULT_*` env at boot:
+  `down_ms` answers `POST /intents` with 503 before writing; `drop_replies` commits the intent then
+  destroys the socket; `delay_replies` + `delay_ms` commit it then answer late. The last two act after
+  the write on purpose. `test/resilience.test.js` clears them after each subtest.
+- **A race test must warm the pg pool first** — `await warmPool(n)` from `test/helpers.js`, as
+  `race.test.js` does. A cold pool opens its connections in parallel, but the handshakes finish at
+  different times, so "concurrent" requests reach Postgres staggered and the test can pass against a
+  broken guard. `n` must not exceed the pool max (10, `src/db.js`); `warmPool` throws if it does.
 - **Never import `../src/*` statically in a test file** — ESM evaluates it (and `config.js`) before
   `helpers.js` has set the env, and every user token then fails with 503. Import `src/` dynamically
   after `helpers.js` (see `payments.test.js` → `runRelayOnce`).
@@ -542,8 +578,8 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   `test/amqp-copies.test.js` fails if they drift. (6) Each service's `pg.Pool` needs its `'error'`
   listener (`src/db.js`): without it a Postgres restart kills the process.
 - **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway, Step 3
-  (Keycloak, per-service JWT verification, ownership, BOLA) and Step 4 (outbox, RabbitMQ, idempotent
-  consumers, DLQ, saga) are done; the team still adds resilience — timeouts, retries, fault switches
-  (Step 5), and observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
+  (Keycloak, per-service JWT verification, ownership, BOLA), Step 4 (outbox, RabbitMQ, idempotent
+  consumers, DLQ, saga) and Step 5 (timeouts, retries, fault switches, the race demo) are done; the
+  team still adds observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
   second-guess them; follow `docs/STEPS.md` for each step's requirements and "done when" criteria.
 - Still out of scope: real payment gateways, chat, cart, subscriptions, SOAP/WSDL.

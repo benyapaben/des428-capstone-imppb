@@ -68,7 +68,8 @@ CREATE TABLE outbox (
 CREATE INDEX idx_outbox_unpublished ON outbox (id) WHERE published_at IS NULL;
 
 -- Inbox: messages consumed from the monolith (booking.completed / booking.cancelled). message_id is
--- "<source>:<id>", the AMQP messageId.
+-- "<source>:<id>", the AMQP messageId. The PRIMARY KEY is the dedupe guard (STEPS.md 5.3): the database
+-- refuses a second row for the same message, however many deliveries race.
 CREATE TABLE processed_messages (
   message_id TEXT PRIMARY KEY,
   source TEXT NOT NULL,

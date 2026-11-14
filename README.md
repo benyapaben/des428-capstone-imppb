@@ -15,6 +15,37 @@ toward microservices. The bounded-context boundaries below **are** the future se
 
 ---
 
+## Step 5 — Area D: Resilience
+
+The one synchronous call left, Booking → Payments `POST /intents`, now survives a slow, cut-off or
+down Payments. Payments has fault switches to prove it, and the race on the wallet credit is shown
+broken, then fixed. Full report: [`docs/step5-resilience-evidence.md`](docs/step5-resilience-evidence.md).
+
+| | What it does |
+|---|---|
+| `lib/clients/payments.js` | each attempt times out after 2 s; network error, timeout or 5xx is retried up to 3 times with full-jitter exponential backoff, **always with the same `Idempotency-Key` (= `order_id`)**, so a retry after a lost reply gets the stored intent (200) instead of a second one. A 4xx is not retried. All attempts failed ⇒ Booking compensates (order cancelled, slots released, `booking.cancelled`) and answers 503 |
+| Payments fault switches | `drop` (commit the intent, then cut the connection), `delay` (commit, then answer late), `down` (503 before writing). Set by `FAULT_*` env at boot or `GET`/`POST`/`DELETE /internal/faults` (internal token, not routed by the gateway, values bounded) |
+| 5.3 race | `booking.completed` delivered concurrently: check-then-insert dedupe credits the wallet 5–6× (commit "Race demo (5.3), step 1" in the Step 5 PR); the PRIMARY KEY + `ON CONFLICT` in the credit's transaction credits it once ("… step 2"). Guarded by `services/payments/test/race.test.js` |
+
+**Configuration**
+
+| Variable | Where | Default | Meaning |
+|---|---|---|---|
+| `PAYMENTS_TIMEOUT_MS` | monolith | `2000` | per-attempt timeout of `POST /intents` |
+| `PAYMENTS_MAX_RETRIES` | monolith | `3` | retries after the first attempt |
+| `PAYMENTS_BACKOFF_BASE_MS` / `PAYMENTS_BACKOFF_CAP_MS` | monolith | `200` / `2000` | full-jitter backoff |
+| `FAULT_DROP_REPLIES`, `FAULT_DELAY_REPLIES`, `FAULT_DELAY_MS`, `FAULT_DOWN_MS` | payments | `0` (off) | fault switches at boot |
+
+**Evidence script** (fault switch hidden from the gateway, faults 1–3 on a real gateway booking, the
+5.3 race over RabbitMQ; exit 0 = all PASS):
+
+```bash
+docker compose up -d --build --wait
+bash deploy/step5-evidence.sh          # ~30 s
+```
+
+---
+
 ## Step 4 — Area C: Outbox, RabbitMQ and saga
 
 Step 2 moved events between services with an HTTP relay. Step 4 replaces that transport with
@@ -182,7 +213,7 @@ service.
 |---|---|---|
 | `notifications` table | SQLite | `notif_db` (notifications svc) |
 | `payment_intents` (+ new `customer_id`, `provider_id`), `transactions`, `provider_wallets`, `webhook_events` | SQLite | `pay_db` (payments svc) |
-| place gateway booking | intent inserted in the booking tx | booking tx commits, then **sync** `POST /intents` (`Idempotency-Key = order_id`); `gateway_ref` copied onto `orders`. Payments down ⇒ order cancelled again (compensation) + 503 |
+| place gateway booking | intent inserted in the booking tx | booking tx commits, then **sync** `POST /intents` (`Idempotency-Key = order_id`); `gateway_ref` copied onto `orders`. Step 5: 2 s timeout per attempt, up to 3 retries with jittered backoff, same key every time. Payments still down ⇒ order cancelled again (compensation) + 503 |
 | `GET /api/bookings/:id` | read `payment_intents` | reads its own copy (`orders.gateway_ref`, `orders.payment_status`) |
 | complete booking | wallet credit inside the OTP-gated tx | OTP-gated `UPDATE` kept; emits `booking.completed`; **Payments** credits the wallet (upserting it on first credit) |
 | cancel booking | refund inserted inline | emits `booking.cancelled`; Payments refunds (→ `payment.refunded`) or voids an unpaid intent |
