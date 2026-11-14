@@ -5,7 +5,7 @@
 //   down   — answer 503 without writing anything, for a window of time
 import { config } from "./config.js";
 
-const state ={ dropReplies: 0, delayReplies: 0, delayMs: 0, downUntil: 0 };
+const state = { dropReplies: 0, delayReplies: 0, delayMs: 0, downUntil: 0 };
 
 export function reset() {
   state.dropReplies = config.faults.dropReplies;

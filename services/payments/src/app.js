@@ -8,7 +8,8 @@ import { getPool } from "./db.js";
 import { config } from "./config.js";
 import * as service from "./service.js";
 import * as faults from "./faults.js";
-import { UnauthorizedError, BadRequestError, ServiceUnavailableError } from "./errors.js";
+import { logger } from "./logger.js";
+import { UnauthorizedError, BadRequestError } from "./errors.js";
 import { requestContext, requireAuth, requireInternal, parse, route, notFound, errorHandler } from "./http.js";
 
 const id = () => z.coerce.number().int().positive();
@@ -28,12 +29,13 @@ const webhookSchema = z.object({
 
 const simulateSchema = z.object({ order_id: id() });
 
-const count = () => z.number().int().min(0).optional();
+// Bounded, so the switch can only ever cause a limited outage (the route trusts any internal-token holder).
+const upTo = (max) => z.number().int().min(0).max(max).optional();
 const faultsSchema = z.object({
-  drop_replies: count(),
-  delay_replies: count(),
-  delay_ms: count(),
-  down_ms: count(),
+  drop_replies: upTo(100),
+  delay_replies: upTo(100),
+  delay_ms: upTo(60_000),
+  down_ms: upTo(600_000),
 }).strict();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,7 +71,12 @@ export function createApp() {
   // AFTER the intent is committed — the reply is cut or arrives too late — which is exactly the case
   // the caller's retry with the same Idempotency-Key must survive (it gets the stored intent, 200).
   app.post("/intents", requireInternal, route(async (req, res) => {
-    if (faults.isDown()) throw new ServiceUnavailableError("payments is down (fault switch)");
+    if (faults.isDown()) {
+      // A deliberate, expected outage: answered here at warn level rather than thrown, so the error
+      // handler does not log it as an unhandled 5xx with a stack trace on every attempt.
+      logger.warn({ requestId: req.id }, "POST /intents refused: down fault switch is on");
+      return res.status(503).json({ error: "payments is down (fault switch)", requestId: req.id });
+    }
     const input = parse(intentSchema, req.body);
     const key = req.get("idempotency-key");
     if (!key || key.trim() !== String(input.order_id)) {
@@ -88,7 +95,12 @@ export function createApp() {
   // ---- internal: Step 5 fault switches (evidence / tests only) ----
   app.get("/internal/faults", requireInternal, (_req, res) => res.json(faults.getFaults()));
   app.post("/internal/faults", requireInternal, route(async (req, res) => {
-    res.json(faults.setFaults(parse(faultsSchema, req.body)));
+    const input = parse(faultsSchema, req.body);
+    const delayMs = input.delay_ms ?? faults.getFaults().delay_ms;
+    if ((input.delay_replies ?? 0) > 0 && delayMs === 0) {
+      throw new BadRequestError("delay_replies needs a delay_ms greater than 0");   // would silently do nothing
+    }
+    res.json(faults.setFaults(input));
   }));
   app.delete("/internal/faults", requireInternal, (_req, res) => res.json(faults.clear()));
 
