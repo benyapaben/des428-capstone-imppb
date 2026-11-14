@@ -20,8 +20,10 @@ confirms, every consumer is idempotent (`processed_messages`), failing messages 
 Booking runs the payment-timeout / late-payment saga — see the README's "Step 4" section and the
 "Outbox + relay + RabbitMQ" section below. Step 5 (Area D, resilience) is **in progress**: `POST /intents`
 has a per-attempt timeout and retries with jittered backoff, and Payments has the three fault switches
-(`/internal/faults`); the race demo (STEPS.md 5.3) and the Step 5 evidence script/report are still to
-come. Step 6 (Area E) belongs to another owner — check open PRs before assuming its status.
+(`/internal/faults`). The race demo (STEPS.md 5.3, wallet credited twice when `booking.completed` is
+delivered concurrently) is a broken-then-fixed commit pair in the Step 5 PR, guarded by
+`services/payments/test/race.test.js`; the Step 5 evidence script/report is still to come. Step 6
+(Area E) belongs to another owner — check open PRs before assuming its status.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -524,6 +526,9 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   `down_ms` answers `POST /intents` with 503 before writing; `drop_replies` commits the intent then
   destroys the socket; `delay_replies` + `delay_ms` commit it then answer late. The last two act after
   the write on purpose. `test/resilience.test.js` clears them after each subtest.
+- **Concurrency tests must warm the pg pool first** (`race.test.js` does): on a cold pool every request
+  waits for its own new connection, so "concurrent" requests reach Postgres one by one and a race
+  test passes even against a broken guard.
 - **Never import `../src/*` statically in a test file** — ESM evaluates it (and `config.js`) before
   `helpers.js` has set the env, and every user token then fails with 503. Import `src/` dynamically
   after `helpers.js` (see `payments.test.js` → `runRelayOnce`).
