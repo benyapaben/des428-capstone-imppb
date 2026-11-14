@@ -15,7 +15,8 @@ run against the full Docker stack plus the automated tests.
 | 5.3 race: concurrent `booking.completed` must credit the wallet once | done: broken commit, then fixed commit | §3, `services/payments/test/race.test.js`, script case 5 |
 
 All of it is on the branch `feature/step5-resilience`. The pull request is squash-merged, so the
-individual commits named below are kept in the PR's commit list, not on `main`.
+individual commits named below (by title, since a rebase changes their hashes) are kept in the PR's
+commit list, not on `main`.
 
 ---
 
@@ -27,10 +28,14 @@ own slot on a random future day, so it can be re-run.
 
 ```bash
 docker compose up -d --build --wait
-bash deploy/step5-evidence.sh          # ~20 s
+bash deploy/step5-evidence.sh          # ~30 s
 ```
 
-Recorded on the branch (fresh `docker compose down` / `up`, third consecutive run, 2026-11-14):
+It reads the stack's own `PAYMENTS_TIMEOUT_MS` / `PAYMENTS_MAX_RETRIES` (fault 2 uses a delay one
+second longer than the timeout), picks another day if an earlier run already used the slots, and the
+race case uses a provider and customer that do not exist, so no real wallet or inbox is touched.
+
+Recorded on the branch (2026-11-14; every run on the branch passed, five runs in all):
 
 ```
 gateway http://localhost:8080   day …   POST /intents timeout 2000 ms, 3 retries
@@ -38,11 +43,11 @@ gateway http://localhost:8080   day …   POST /intents timeout 2000 ms, 3 retri
 CASE                                                           RESULT DETAIL
 ----                                                           ------ ------
 fault switch not reachable through the gateway                 PASS  /internal/faults 404, /api/internal/faults 404
-baseline: gateway booking                                      PASS  201, order 8011, 1 intent
-fault 1 drop: retried, intent saved exactly once               PASS  201, order 8012, 1 intent, 1 retry
-fault 2 delay (3 s > 2 s timeout): saved exactly once          PASS  201, order 8013, 1 intent, retry after timeout
-fault 3 down: 503 after the retries, order compensated         PASS  503 after 1s, order 8014 cancelled, 0 intents, 3 retries
-fault 3 down: slot released, booked again once Payments is back PASS  201, order 8015
+baseline: gateway booking                                      PASS  201, order 8023, 1 intent
+fault 1 drop: retried, intent saved exactly once               PASS  201, order 8024, 1 intent, 1 retry
+fault 2 delay (reply later than the timeout): saved once       PASS  201, order 8025, 1 intent, retry after 2000 ms timeout
+fault 3 down: 503 after the retries, order compensated         PASS  503 after 1s, order 8026 cancelled, 0 intents, 3 retries
+fault 3 down: slot released, booked again once Payments is back PASS  201, order 8027
 race 5.3: 10 copies of one booking.completed -> credited once  PASS  1 payout_credit, wallet +54570
 
 ALL PASS
@@ -53,8 +58,8 @@ ALL PASS
 | Images | Result |
 |---|---|
 | monolith from `main` (no retries, 5 s timeout) + payments from this branch | fault 1 **FAIL** (503: the lost reply is not retried, so the booking is cancelled although the intent was written); fault 2 **FAIL** (no retry: the old 5 s timeout outlasts the 3 s delay); fault 3 **FAIL** (cancelled after 0 retries) |
-| payments with the broken dedupe from commit `729cd73` | race case **FAIL** in 2 of 3 runs (`2 payout_credit, wallet +109140`) |
-| this branch | every case PASS, three runs in a row |
+| payments with the broken dedupe from `Race demo (5.3), step 1: check-then-insert inbox dedupe (broken)` | race case **FAIL** in 3 of 3 runs (`2 payout_credit, wallet +109140`) |
+| this branch | every case PASS |
 
 The edemand log of the down case shows the retries and the jittered delays (from three runs):
 
@@ -107,7 +112,7 @@ comes back at once.
 ### The fault switches (Payments)
 
 [`services/payments/src/faults.js`](../services/payments/src/faults.js), applied by `POST /intents`
-in [`services/payments/src/app.js`](../services/payments/src/app.js) (lines 74–92):
+in [`services/payments/src/app.js`](../services/payments/src/app.js) (lines 73–94):
 
 | Fault | Switch | What `POST /intents` does |
 |---|---|---|
@@ -139,8 +144,8 @@ provider is paid more than once.
 
 | Commit | Dedupe in `recordInbound` | `race.test.js` (10 concurrent deliveries), 3 runs | Payments suite |
 |---|---|---|---|
-| `729cd73` (broken on purpose) | `SELECT` the message id; if absent, `INSERT` it. `processed_messages.message_id` has no PRIMARY KEY | **credited 5×, 6×, 6×** | 33/36 |
-| `3ebb605` (fixed) | `INSERT … ON CONFLICT (message_id) DO NOTHING` on a PRIMARY KEY, in the same transaction as the credit | **credited 1×, 1×, 1×** | 36/36 |
+| `Race demo (5.3), step 1: check-then-insert inbox dedupe (broken)` | `SELECT` the message id; if absent, `INSERT` it. `processed_messages.message_id` has no PRIMARY KEY | **credited 5×, 6×, 6×** | 33/36 |
+| `Race demo (5.3), step 2: dedupe on the PRIMARY KEY in the transaction` | `INSERT … ON CONFLICT (message_id) DO NOTHING` on a PRIMARY KEY, in the same transaction as the credit | **credited 1×, 1×, 1×** | 36/36 |
 
 Why the first one breaks: under READ COMMITTED, each delivery's transaction runs its `SELECT`
 before any of the others commits, so all of them see "not processed yet", all insert, and all credit
@@ -160,8 +165,10 @@ Two things found on the way:
   times, so the 10 "concurrent" deliveries reached Postgres one after another. The test now calls
   `warmPool(N)` first ([`services/payments/test/helpers.js`](../services/payments/test/helpers.js)
   line 67, which throws if `N` exceeds the pool max of 10). Only then does it show 5–6× on the broken
-  code. The same effect is why script case 5 first warms Payments' pool with ten no-op events and
-  pauses the payments container for a second while the ten copies are published.
+  code. The same effect is why script case 5 first warms Payments' pool with ten no-op events (and
+  waits until Postgres shows all ten processed) and pauses the payments container for a second while
+  the ten copies are published. Without those two steps the live case passed even against the broken
+  dedupe; with them it fails there 3 runs out of 3.
 
 ---
 

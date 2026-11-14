@@ -149,7 +149,7 @@ bash deploy/keycloak/step3-evidence.sh   # stack must be up; real Keycloak token
 PAYMENT_TIMEOUT_SECONDS=30 docker compose up -d --build --wait     # short saga timeout for the demo ...
 PAYMENT_TIMEOUT_SECONDS=30 bash deploy/rabbitmq/step4-evidence.sh  # ... then RabbitMQ / DLQ / saga evidence, ~2-3 min
 bash deploy/rabbitmq/amqp-robustness-evidence.sh   # consumers survive a broker restart mid-delivery + a DB blip, ~1-2 min
-bash deploy/step5-evidence.sh                      # Step 5: faults 1-3 on POST /intents + the 5.3 race, ~20 s
+bash deploy/step5-evidence.sh                      # Step 5: faults 1-3 on POST /intents + the 5.3 race, ~30 s
 docker compose down -v
 ```
 
@@ -578,8 +578,8 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   `test/amqp-copies.test.js` fails if they drift. (6) Each service's `pg.Pool` needs its `'error'`
   listener (`src/db.js`): without it a Postgres restart kills the process.
 - **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway, Step 3
-  (Keycloak, per-service JWT verification, ownership, BOLA) and Step 4 (outbox, RabbitMQ, idempotent
-  consumers, DLQ, saga) are done; the team still adds resilience — timeouts, retries, fault switches
-  (Step 5), and observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
+  (Keycloak, per-service JWT verification, ownership, BOLA), Step 4 (outbox, RabbitMQ, idempotent
+  consumers, DLQ, saga) and Step 5 (timeouts, retries, fault switches, the race demo) are done; the
+  team still adds observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
   second-guess them; follow `docs/STEPS.md` for each step's requirements and "done when" criteria.
 - Still out of scope: real payment gateways, chat, cart, subscriptions, SOAP/WSDL.

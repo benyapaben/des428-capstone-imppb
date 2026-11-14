@@ -25,7 +25,7 @@ broken, then fixed. Full report: [`docs/step5-resilience-evidence.md`](docs/step
 |---|---|
 | `lib/clients/payments.js` | each attempt times out after 2 s; network error, timeout or 5xx is retried up to 3 times with full-jitter exponential backoff, **always with the same `Idempotency-Key` (= `order_id`)**, so a retry after a lost reply gets the stored intent (200) instead of a second one. A 4xx is not retried. All attempts failed ⇒ Booking compensates (order cancelled, slots released, `booking.cancelled`) and answers 503 |
 | Payments fault switches | `drop` (commit the intent, then cut the connection), `delay` (commit, then answer late), `down` (503 before writing). Set by `FAULT_*` env at boot or `GET`/`POST`/`DELETE /internal/faults` (internal token, not routed by the gateway, values bounded) |
-| 5.3 race | `booking.completed` delivered concurrently: check-then-insert dedupe credits the wallet 5–6× (commit `729cd73` in the Step 5 PR); the PRIMARY KEY + `ON CONFLICT` in the credit's transaction credits it once (`3ebb605`). Guarded by `services/payments/test/race.test.js` |
+| 5.3 race | `booking.completed` delivered concurrently: check-then-insert dedupe credits the wallet 5–6× (commit "Race demo (5.3), step 1" in the Step 5 PR); the PRIMARY KEY + `ON CONFLICT` in the credit's transaction credits it once ("… step 2"). Guarded by `services/payments/test/race.test.js` |
 
 **Configuration**
 
@@ -41,7 +41,7 @@ broken, then fixed. Full report: [`docs/step5-resilience-evidence.md`](docs/step
 
 ```bash
 docker compose up -d --build --wait
-bash deploy/step5-evidence.sh          # ~20 s
+bash deploy/step5-evidence.sh          # ~30 s
 ```
 
 ---
