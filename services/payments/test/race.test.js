@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { boot, sendEvent, sql } from "./helpers.js";
+import { boot, sendEvent, sql, warmPool } from "./helpers.js";
 
 const app = await boot();
 after(() => app.close());
@@ -19,10 +19,7 @@ const completed = (id, order_id) => ({
 test("booking.completed delivered N times at the same moment credits the wallet once", async () => {
   const before = (await sql("SELECT balance_cents FROM provider_wallets WHERE provider_id = $1", [PROVIDER]))[0].balance_cents;
 
-  // Warm the pg pool first. On a cold pool each delivery waits for its own new connection, so the N
-  // requests reach the database one after another and the race never happens; with N connections
-  // already open they really run their transactions at the same time.
-  await Promise.all(Array.from({ length: N }, () => sql("SELECT pg_sleep(0.05)")));
+  await warmPool(N);   // without it the N deliveries reach Postgres staggered and never race
 
   const results = await Promise.all(Array.from({ length: N }, () => sendEvent(app.base, completed(701, 9701))));
   assert.ok(results.every((r) => r.status === 200));

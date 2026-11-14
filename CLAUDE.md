@@ -22,7 +22,9 @@ Booking runs the payment-timeout / late-payment saga — see the README's "Step 
 has a per-attempt timeout and retries with jittered backoff, and Payments has the three fault switches
 (`/internal/faults`). The race demo (STEPS.md 5.3, wallet credited twice when `booking.completed` is
 delivered concurrently) is a broken-then-fixed commit pair in the Step 5 PR, guarded by
-`services/payments/test/race.test.js`; the Step 5 evidence script/report is still to come. Step 6
+`services/payments/test/race.test.js`. The PR is squash-merged, so the broken commit is not on `main`:
+see it in the PR's commit list, or `git fetch origin pull/<PR number>/head`. The Step 5 evidence
+script/report is still to come. Step 6
 (Area E) belongs to another owner — check open PRs before assuming its status.
 
 ```
@@ -526,9 +528,10 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
   `down_ms` answers `POST /intents` with 503 before writing; `drop_replies` commits the intent then
   destroys the socket; `delay_replies` + `delay_ms` commit it then answer late. The last two act after
   the write on purpose. `test/resilience.test.js` clears them after each subtest.
-- **Concurrency tests must warm the pg pool first** (`race.test.js` does): on a cold pool every request
-  waits for its own new connection, so "concurrent" requests reach Postgres one by one and a race
-  test passes even against a broken guard.
+- **A race test must warm the pg pool first** — `await warmPool(n)` from `test/helpers.js`, as
+  `race.test.js` does. A cold pool opens its connections in parallel, but the handshakes finish at
+  different times, so "concurrent" requests reach Postgres staggered and the test can pass against a
+  broken guard. `n` must not exceed the pool max (10, `src/db.js`); `warmPool` throws if it does.
 - **Never import `../src/*` statically in a test file** — ESM evaluates it (and `config.js`) before
   `helpers.js` has set the env, and every user token then fails with 503. Import `src/` dynamically
   after `helpers.js` (see `payments.test.js` → `runRelayOnce`).
