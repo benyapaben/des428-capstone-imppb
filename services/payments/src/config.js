@@ -1,6 +1,9 @@
 // All environment configuration for the payments service, in one grep-able place.
 const NODE_ENV = process.env.NODE_ENV || "development";
 
+// A non-negative integer setting: 0 is a valid value, while unset, empty or malformed falls back.
+const intEnv = (name, fallback) => (/^\d+$/.test(process.env[name] ?? "") ? Number(process.env[name]) : fallback);
+
 export const config = Object.freeze({
   serviceName: "payments",
   nodeEnv: NODE_ENV,
@@ -26,6 +29,14 @@ export const config = Object.freeze({
   // 0 is allowed (no in-process retry); empty or invalid falls back to 5 rather than silently to 0.
   consumerRetries: /^\d+$/.test(process.env.CONSUMER_RETRIES ?? "") ? Number(process.env.CONSUMER_RETRIES) : 5,
   consumerRetryBaseMs: parseInt(process.env.CONSUMER_RETRY_BASE_MS, 10) || 500,
+  // Step 5 fault switches for POST /intents (src/faults.js), all off by default. These are the values
+  // at boot; /internal/faults changes them at runtime. dropReplies / delayReplies count requests down.
+  faults: Object.freeze({
+    dropReplies: intEnv("FAULT_DROP_REPLIES", 0),   // write the intent, then cut the connection
+    delayReplies: intEnv("FAULT_DELAY_REPLIES", 0), // write the intent, then answer delayMs late
+    delayMs: intEnv("FAULT_DELAY_MS", 0),
+    downMs: intEnv("FAULT_DOWN_MS", 0),             // answer 503 (writing nothing) for this long after boot
+  }),
   // Wallet rows seeded on boot — the same provider ids the monolith seeds (sparkle, fixit, glow).
   seedProviderIds: (process.env.SEED_PROVIDER_IDS || "1,2,3").split(",").map(Number).filter(Boolean),
   logLevel: process.env.LOG_LEVEL || (NODE_ENV === "test" ? "silent" : "info"),

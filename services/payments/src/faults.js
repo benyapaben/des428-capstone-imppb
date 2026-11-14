@@ -1,6 +1,11 @@
+// Step 5 fault switches for POST /intents (used by app.js). Three faults, for resilience tests and
+// evidence only — all off unless set via FAULT_* env at boot or the internal /internal/faults route:
+//   drop   — write the intent, then cut the connection (the caller sees no reply)
+//   delay  — write the intent, then answer delayMs late (slower than the caller's timeout)
+//   down   — answer 503 without writing anything, for a window of time
 import { config } from "./config.js";
 
-const state = { dropReplies: 0, delayReplies: 0, delayMs: 0, downUntil: 0 };
+const state ={ dropReplies: 0, delayReplies: 0, delayMs: 0, downUntil: 0 };
 
 export function reset() {
   state.dropReplies = config.faults.dropReplies;
