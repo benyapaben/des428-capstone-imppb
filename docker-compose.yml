@@ -89,6 +89,11 @@ services:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-edemand-webhook-secret}
       SEED_PROVIDER_IDS: "1,2,3"
       AMQP_URL: amqp://guest:guest@rabbitmq:5672
+      # Step 5 fault switches for POST /intents (0 = off); also settable at runtime via /internal/faults
+      FAULT_DROP_REPLIES: ${FAULT_DROP_REPLIES:-0}
+      FAULT_DELAY_REPLIES: ${FAULT_DELAY_REPLIES:-0}
+      FAULT_DELAY_MS: ${FAULT_DELAY_MS:-0}
+      FAULT_DOWN_MS: ${FAULT_DOWN_MS:-0}
     depends_on:
       pay-db: { condition: service_healthy }
       keycloak: { condition: service_healthy }

@@ -182,7 +182,7 @@ service.
 |---|---|---|
 | `notifications` table | SQLite | `notif_db` (notifications svc) |
 | `payment_intents` (+ new `customer_id`, `provider_id`), `transactions`, `provider_wallets`, `webhook_events` | SQLite | `pay_db` (payments svc) |
-| place gateway booking | intent inserted in the booking tx | booking tx commits, then **sync** `POST /intents` (`Idempotency-Key = order_id`); `gateway_ref` copied onto `orders`. Payments down ⇒ order cancelled again (compensation) + 503 |
+| place gateway booking | intent inserted in the booking tx | booking tx commits, then **sync** `POST /intents` (`Idempotency-Key = order_id`); `gateway_ref` copied onto `orders`. Step 5: 2 s timeout per attempt, up to 3 retries with jittered backoff, same key every time. Payments still down ⇒ order cancelled again (compensation) + 503 |
 | `GET /api/bookings/:id` | read `payment_intents` | reads its own copy (`orders.gateway_ref`, `orders.payment_status`) |
 | complete booking | wallet credit inside the OTP-gated tx | OTP-gated `UPDATE` kept; emits `booking.completed`; **Payments** credits the wallet (upserting it on first credit) |
 | cancel booking | refund inserted inline | emits `booking.cancelled`; Payments refunds (→ `payment.refunded`) or voids an unpaid intent |

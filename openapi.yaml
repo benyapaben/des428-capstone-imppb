@@ -224,6 +224,7 @@ paths:
       responses:
         '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/PlaceBookingResult' } } } }
         '409': { description: 'slot no longer available', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '503': { description: 'gateway booking only: Payments did not answer after the timeout and retries; the order was cancelled again (slots released) — safe to retry', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     get:
       tags: [Booking]
       summary: 'My bookings (C or P), paginated, ?status'
