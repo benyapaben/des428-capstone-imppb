@@ -69,13 +69,16 @@ CREATE INDEX idx_outbox_unpublished ON outbox (id) WHERE published_at IS NULL;
 
 -- Inbox: messages consumed from the monolith (booking.completed / booking.cancelled). message_id is
 -- "<source>:<id>", the AMQP messageId.
+-- STEP 5.3 RACE DEMO (deliberately broken): no PRIMARY KEY / UNIQUE on message_id, only a plain index
+-- for the lookup. Nothing in the database stops two rows with the same message_id.
 CREATE TABLE processed_messages (
-  message_id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
   source TEXT NOT NULL,
   event_id INTEGER NOT NULL,
   type TEXT NOT NULL,
   received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_processed_messages_message_id ON processed_messages (message_id);
 `;
 
 export async function migrate(db) {

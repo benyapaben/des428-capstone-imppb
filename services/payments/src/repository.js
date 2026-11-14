@@ -107,11 +107,17 @@ export async function markPublished(db, id) {
 }
 
 // ---- processed_messages : the inbox ----
+// STEP 5.3 RACE DEMO (deliberately broken): check-then-insert. Sequential redeliveries are caught,
+// because the SELECT sees the row an earlier, committed delivery wrote. Concurrent deliveries are not:
+// under READ COMMITTED each transaction's SELECT runs before the others commit, so every one of them
+// sees "not processed yet", inserts its own row and goes on to credit the wallet.
 export async function recordInbound(db, source, eventId, type) {
-  const { rowCount } = await db.query(
-    `INSERT INTO processed_messages (message_id, source, event_id, type) VALUES ($1, $2, $3, $4)
-     ON CONFLICT (message_id) DO NOTHING`,
-    [`${source}:${eventId}`, source, eventId, type]
+  const messageId = `${source}:${eventId}`;
+  const seen = await db.query("SELECT 1 FROM processed_messages WHERE message_id = $1", [messageId]);
+  if (seen.rowCount > 0) return false;
+  await db.query(
+    "INSERT INTO processed_messages (message_id, source, event_id, type) VALUES ($1, $2, $3, $4)",
+    [messageId, source, eventId, type]
   );
-  return rowCount === 1;
+  return true;
 }
