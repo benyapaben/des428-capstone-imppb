@@ -18,14 +18,14 @@ tests in the services, and curl evidence — summarised in `docs/step3-security-
 Step 4 (Area C, outbox / RabbitMQ / saga) is **done**: both relays publish to RabbitMQ with publisher
 confirms, every consumer is idempotent (`processed_messages`), failing messages are dead-lettered, and
 Booking runs the payment-timeout / late-payment saga — see the README's "Step 4" section and the
-"Outbox + relay + RabbitMQ" section below. Step 5 (Area D, resilience) is **in progress**: `POST /intents`
+"Outbox + relay + RabbitMQ" section below. Step 5 (Area D, resilience) is **done** (README "Step 5" section,
+`docs/step5-resilience-evidence.md`): `POST /intents`
 has a per-attempt timeout and retries with jittered backoff, and Payments has the three fault switches
 (`/internal/faults`). The race demo (STEPS.md 5.3, wallet credited twice when `booking.completed` is
 delivered concurrently) is a broken-then-fixed commit pair in the Step 5 PR, guarded by
 `services/payments/test/race.test.js`. The PR is squash-merged, so the broken commit is not on `main`:
-see it in the PR's commit list, or `git fetch origin pull/<PR number>/head`. The Step 5 evidence
-script/report is still to come. Step 6
-(Area E) belongs to another owner — check open PRs before assuming its status.
+see it in the PR's commit list, or `git fetch origin pull/<PR number>/head`. Step 6 (Area E) belongs to
+another owner — check open PRs before assuming its status.
 
 ```
 Browser ──▶ nginx gateway :8080  (gateway/nginx.conf)
@@ -149,6 +149,7 @@ bash deploy/keycloak/step3-evidence.sh   # stack must be up; real Keycloak token
 PAYMENT_TIMEOUT_SECONDS=30 docker compose up -d --build --wait     # short saga timeout for the demo ...
 PAYMENT_TIMEOUT_SECONDS=30 bash deploy/rabbitmq/step4-evidence.sh  # ... then RabbitMQ / DLQ / saga evidence, ~2-3 min
 bash deploy/rabbitmq/amqp-robustness-evidence.sh   # consumers survive a broker restart mid-delivery + a DB blip, ~1-2 min
+bash deploy/step5-evidence.sh                      # Step 5: faults 1-3 on POST /intents + the 5.3 race, ~20 s
 docker compose down -v
 ```
 
@@ -157,6 +158,13 @@ succeeds while RabbitMQ is stopped and its events arrive after the restart, a po
 `payments.events.dlq`, and an unpaid gateway booking is cancelled by the saga timeout (that case is
 SKIPped unless the stack was started with a short `PAYMENT_TIMEOUT_SECONDS`); exit 0 = all PASS.
 `SKIP_OUTAGE=1` skips the stop/start case.
+
+`step5-evidence.sh` is the Step 5 evidence: the fault switch is not reachable through the gateway; a
+gateway booking survives fault 1 (reply cut) and fault 2 (reply later than the timeout) with exactly one
+intent; under fault 3 (down) it gets 503 after 3 retries, the order is compensated and the slot can be
+booked again; and 10 copies of one `booking.completed` handled at once credit the wallet once (it warms
+Payments' pool and pauses the payments container for ~1 s to make them race). It sets and always clears
+the faults itself; exit 0 = all PASS. Its recorded output is in `docs/step5-resilience-evidence.md`.
 
 `amqp-robustness-evidence.sh` checks the consumer hardening: with both service DBs paused (handlers
 hang), RabbitMQ is restarted and the DBs resumed, so the handlers ack on closed channels — payments and
