@@ -27,7 +27,7 @@ export const config = Object.freeze({
   // doubled each time (~15.5 s with the defaults), before handing the message back to the broker.
   publishTimeoutMs: parseInt(process.env.PUBLISH_TIMEOUT_MS, 10) || 5000,
   // 0 is allowed (no in-process retry); empty or invalid falls back to 5 rather than silently to 0.
-  consumerRetries: /^\d+$/.test(process.env.CONSUMER_RETRIES ?? "") ? Number(process.env.CONSUMER_RETRIES) : 5,
+  consumerRetries: intEnv("CONSUMER_RETRIES", 5),
   consumerRetryBaseMs: parseInt(process.env.CONSUMER_RETRY_BASE_MS, 10) || 500,
   // Step 5 fault switches for POST /intents (src/faults.js), all off by default. These are the values
   // at boot; /internal/faults changes them at runtime. dropReplies / delayReplies count requests down.
