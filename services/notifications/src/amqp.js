@@ -169,13 +169,22 @@ export async function publish(channel, envelope, { timeoutMs = config.publishTim
 // back to the broker. ack/nack never throw out of here: if the channel closed meanwhile, the broker
 // redelivers the unacked message on its own and the inbox makes the redelivery a no-op. `isOpen` lets
 // the caller stop the retries once the channel is gone, since the broker is redelivering it anyway.
-export async function handleDelivery(ch, msg, handle, log = console, {
+//
+// Step 6 (E5): the whole delivery runs in the publisher's context from the message headers — its trace
+// and the request_id baggage — so the consumer's own log lines (retries, dead-lettering) and the
+// handler's carry the trace_id and the request_id of the request that caused the event.
+export function handleDelivery(ch, msg, handle, log = console, options = {}) {
+  const parent = propagation.extract(ROOT_CONTEXT, msg.properties?.headers ?? {});
+  return context.with(parent, () => deliver(ch, msg, handle, log, options));
+}
+
+async function deliver(ch, msg, handle, log, {
   retries = config.consumerRetries,
   baseMs = config.consumerRetryBaseMs,
   wait = sleep,
   isOpen = () => true,
   queue,
-} = {}) {
+}) {
   const settle = (action, ...args) => {
     try {
       ch[action](msg, ...args);
@@ -192,8 +201,8 @@ export async function handleDelivery(ch, msg, handle, log = console, {
     return settle("nack", false, false);                       // retrying cannot fix bad JSON
   }
 
-  // The publisher's span, from the message headers (none: this delivery starts a new trace).
-  const parent = propagation.extract(ROOT_CONTEXT, msg.properties?.headers ?? {});
+  // Each attempt is a child of the publisher's span (none in the headers: a new trace per attempt).
+  const parent = context.active();
   for (let attempt = 0; ; attempt++) {
     const span = tracer.startSpan(`process ${envelope.type}`, {
       kind: SpanKind.CONSUMER,
@@ -204,7 +213,11 @@ export async function handleDelivery(ch, msg, handle, log = console, {
       },
     }, parent);
     try {
-      await context.with(trace.setSpan(parent, span), () => handle(envelope, msg));
+      await context.with(trace.setSpan(parent, span), async () => {
+        await handle(envelope, msg);
+        log.info?.({ queue, type: envelope.type, message_id: `${envelope.source}:${envelope.id}`, attempt: attempt + 1 },
+          "consumer: processed");                              // inside the span: its span_id
+      });
       endSpan(span);
       return settle("ack");
     } catch (err) {

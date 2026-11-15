@@ -74,7 +74,7 @@ export function createApp() {
     if (faults.isDown()) {
       // A deliberate, expected outage: answered here at warn level rather than thrown, so the error
       // handler does not log it as an unhandled 5xx with a stack trace on every attempt.
-      logger.warn({ requestId: req.id }, "POST /intents refused: down fault switch is on");
+      logger.warn({ request_id: req.id }, "POST /intents refused: down fault switch is on");
       return res.status(503).json({ error: "payments is down (fault switch)", requestId: req.id });
     }
     const input = parse(intentSchema, req.body);

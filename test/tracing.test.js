@@ -3,6 +3,9 @@
 // AMQP headers, and every consumer attempt is a span under that publish span, with the handler
 // running inside it. Real relay, real publish() and handleDelivery(); spans go to an in-memory
 // exporter instead of Jaeger.
+// Step 6 (E5): log correlation. handle() puts the request id into the context (baggage) and answers
+// with X-Trace-Id; the baggage rides the outbox and the AMQP headers, so a consumer's log lines carry
+// the request_id of the request that caused the event; pino's mixin adds request_id/trace_id/span_id.
 import { freshBoot, getDb, fake, fakeBroker } from "../test-helpers/boot.js";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +16,11 @@ import { loginAdmin } from "../test-helpers/auth.js";
 import { runRelayOnce } from "../lib/outbox/relay.js";
 import { handleDelivery } from "../lib/amqp/connection.js";
 import { insertEvent } from "../lib/db/events.js";
+import { logger, correlation } from "../lib/logger.js";
+import { handle } from "../lib/http/handle.js";
+import { json } from "../lib/http/respond.js";
+import { NotFoundError } from "../lib/errors.js";
+import pino from "pino";
 import * as approve from "../app/api/admin/providers/[id]/approve/route.js";
 
 freshBoot();
@@ -41,8 +49,11 @@ test("request -> outbox -> publish -> consume is one trace", async () => {
 
   // The approval request, as Next's SERVER span would be in production.
   const request = await tracer.startActiveSpan("POST /api/admin/providers/:id/approve", async (span) => {
-    const res = await call(approve.POST, { token: admin.token, params: { id: String(glowId) }, method: "POST" });
+    const res = await call(approve.POST, {
+      token: admin.token, params: { id: String(glowId) }, method: "POST", headers: { "x-request-id": "req-e5-approve" },
+    });
     assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-trace-id"), span.spanContext().traceId, "E5: the response names its trace");
     span.end();
     return span;
   });
@@ -50,6 +61,7 @@ test("request -> outbox -> publish -> consume is one trace", async () => {
 
   const row = getDb().prepare("SELECT trace_context FROM events WHERE type = 'provider.approved'").get();
   assert.match(JSON.parse(row.trace_context).traceparent, new RegExp(`^00-${traceId}-`), "the row keeps the request's trace");
+  assert.equal(JSON.parse(row.trace_context).baggage, "request_id=req-e5-approve", "E5: and its request id");
 
   // The relay runs later, from its own timer: no active span here.
   await runRelayOnce({ publisher: fakeBroker.channel });
@@ -65,13 +77,21 @@ test("request -> outbox -> publish -> consume is one trace", async () => {
 
   // A consumer that fails once: two attempt spans, both under the publish span; the handler runs inside.
   let calls = 0;
-  let seenTraceId;
+  let seenTraceId, seenLogFields;
+  const retryLogs = [];
+  const log = { warn: () => retryLogs.push(correlation()), error() {}, info() {} };
   await handleDelivery(ackChannel, toAmqpMessage(message), async () => {
     seenTraceId = trace.getActiveSpan()?.spanContext().traceId;
+    seenLogFields = correlation();
     if (++calls === 1) throw new Error("db blip");
-  }, console, { queue: "notifications.events", retries: 1, wait: async () => {} });
+  }, log, { queue: "notifications.events", retries: 1, wait: async () => {} });
 
   assert.equal(seenTraceId, traceId, "the handler runs inside the consumer span");
+  assert.equal(seenLogFields.request_id, "req-e5-approve", "E5: the consumer's log lines carry the request's id");
+  assert.equal(seenLogFields.trace_id, traceId);
+  assert.equal(retryLogs.length, 1);
+  assert.deepEqual([retryLogs[0].request_id, retryLogs[0].trace_id], ["req-e5-approve", traceId],
+    "E5: so do the consumer's own retry lines");
   const attempts = spans("process provider.approved");
   assert.equal(attempts.length, 2);
   for (const s of attempts) {
@@ -115,4 +135,32 @@ test("a failed publish is an ERROR span and the event is retried in the same tra
   assert.equal(publishes.length, 2);
   assert.deepEqual(publishes.map((s) => s.status.code), [SpanStatusCode.ERROR, SpanStatusCode.UNSET]);
   assert.equal(new Set(publishes.map((s) => s.spanContext().traceId)).size, 1);
+});
+
+test("E5: handle() gives errors an X-Trace-Id and its log lines request_id + trace_id", async () => {
+  let fields;
+  const route = handle(async () => {
+    fields = correlation();
+    throw new NotFoundError("nope");
+  });
+  const { res, span } = await tracer.startActiveSpan("GET /x", async (span) => {
+    const res = await route(new Request("http://test.local/x", { headers: { "x-request-id": "req-e5-404" } }));
+    span.end();
+    return { res, span };
+  });
+  assert.equal(res.status, 404);
+  assert.equal(res.headers.get("x-request-id"), "req-e5-404");
+  assert.equal(res.headers.get("x-trace-id"), span.spanContext().traceId);
+  assert.equal(fields.request_id, "req-e5-404");
+  assert.equal(fields.trace_id, span.spanContext().traceId);
+  assert.match(fields.span_id, /^[0-9a-f]{16}$/);
+
+  // Outside any request there is nothing to add.
+  assert.deepEqual(correlation(), {});
+  const ok = await handle(async () => json({ ok: true }))(new Request("http://test.local/"));
+  assert.equal(ok.headers.get("x-trace-id"), null, "no active span: no X-Trace-Id");
+});
+
+test("E5: the shared logger writes the correlation fields on every line", () => {
+  assert.equal(logger[pino.symbols.mixinSym], correlation);
 });

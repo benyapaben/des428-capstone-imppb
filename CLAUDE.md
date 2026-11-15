@@ -234,6 +234,19 @@ Without an SDK no header is written. Tests: `test/tracing.test.js` and
 (`resourceDetectors: []`, or `SimpleSpanProcessor` exports late); `fakeBroker` messages carry
 `properties.headers`.
 
+**Log correlation (Step 6 / E5).** Every pino logger (`lib/logger.js`, `services/*/src/logger.js` —
+same `correlation()` / `withRequestId()` logic in all three, the two service files identical) has a
+`mixin` that adds `request_id`, `trace_id` and `span_id` from the active OpenTelemetry context; a
+field the call passes itself wins. `request_id` is **W3C baggage**: `handle()` (monolith) and
+`requestContext` (services) run the request inside `withRequestId()`, so it is injected with the trace
+context into outgoing calls, the outbox `trace_context` column and the AMQP headers, and a consumer's
+lines show the id of the request that caused the event. Log fields are snake_case (`request_id`); the
+error **body** keeps `requestId` (API contract). One `"request"` line per HTTP request in all three
+processes (the monolith writes it in `handle()`), except `/api/health`, `/api/metrics`, `/health`,
+`/metrics`; one `"consumer: processed"` line per handled message. Responses carry **`X-Trace-Id`**
+(open `http://localhost:16686/trace/<id>`) next to `X-Request-Id`. Lines outside a request or message
+(boot, relay ticks) have neither; without an SDK only the explicit `request_id` fields remain.
+
 **OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
 1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0 — in the
 monolith and both services. From SDK 0.300 on they require Node ≥ 22.15 — do not bump them without

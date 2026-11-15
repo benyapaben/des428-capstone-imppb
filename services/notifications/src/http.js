@@ -4,26 +4,36 @@
 import { randomUUID } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from "jose";
 import { config } from "./config.js";
-import { logger } from "./logger.js";
+import { isSpanContextValid, trace } from "@opentelemetry/api";
+import { logger, withRequestId } from "./logger.js";
 import { AppError, UnauthorizedError, ForbiddenError, BadRequestError } from "./errors.js";
 
 // Keycloak's signing keys. Fetched lazily on the first token, cached, and re-fetched when a token
 // names a key id we have not seen (key rotation).
 const jwks = createRemoteJWKSet(new URL(config.jwksUrl));
 
+// Compose's healthcheck (every 10 s) and Prometheus' scrape (every few s) would flood the log.
+const UNLOGGED = new Set(["/health", "/metrics"]);
+
 export function requestContext(req, res, next) {
   const incoming = req.get("x-request-id");
   req.id = incoming && incoming.trim() ? incoming.trim() : randomUUID();
   req.traceparent = req.get("traceparent") || undefined;
   res.set("X-Request-Id", req.id);
+  // Step 6 (E5): the trace this request is part of — paste it into Jaeger (/trace/<id>).
+  const span = trace.getActiveSpan()?.spanContext();
+  if (span && isSpanContextValid(span)) res.set("X-Trace-Id", span.traceId);
   const started = Date.now();
   res.on("finish", () => {
+    if (UNLOGGED.has(req.path)) return;
     logger.info(
-      { requestId: req.id, traceparent: req.traceparent, method: req.method, path: req.path, status: res.statusCode, ms: Date.now() - started },
+      { request_id: req.id, method: req.method, path: req.path, status: res.statusCode, ms: Date.now() - started },
       "request"
     );
   });
-  next();
+  // Step 6 (E5): the rest of the request runs with request_id in the OpenTelemetry context (baggage),
+  // so every log line and outbox row it writes carries it — also after express.json() has read the body.
+  withRequestId(req.id, next);
 }
 
 function readToken(req) {
@@ -129,11 +139,11 @@ export function errorHandler(err, req, res, _next) {
   const body = { error: err.message || "internal server error", requestId: req.id };
   if (err instanceof AppError && err.details !== undefined) body.details = err.details;
   if (status >= 500) {
-    logger.error({ requestId: req.id, err: err.stack || String(err) }, "unhandled error");
+    logger.error({ request_id: req.id, err: err.stack || String(err) }, "unhandled error");
     body.error = "internal server error";
     delete body.details;
   } else {
-    logger.warn({ requestId: req.id, status, err: err.message }, "request error");
+    logger.warn({ request_id: req.id, status, err: err.message }, "request error");
   }
   res.status(status).json(body);
 }
