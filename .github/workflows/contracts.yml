@@ -1,0 +1,96 @@
+# Step 6 / E7: Pact contract tests between the monolith (consumer) and the two extracted services
+# (providers). No Pact Broker: the consumer job writes the pact files and hands them to the provider
+# jobs as an artifact.
+#
+#   consumer               npm run test:pact (repo root)      -> pacts/edemand-payments.json
+#                                                                pacts/edemand-notifications.json
+#   provider-payments      verifies edemand-payments.json      against the real app + Postgres
+#   provider-notifications verifies edemand-notifications.json against the real app + Postgres
+#
+# Run it locally with act — stop the compose stack first (docker compose down), it needs the memory:
+#   act pull_request -W .github/workflows/contracts.yml \
+#     -P ubuntu-latest=node:20-bookworm --artifact-server-path /tmp/act-artifacts
+#
+# Every job runs inside node:20-bookworm (Node 20 like the Dockerfiles; Pact is pinned to 16.5.0, the
+# last line that supports it). Being in a container also makes Postgres reachable as `postgres:5432` the
+# same way on GitHub and under act.
+name: contracts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  consumer:
+    name: consumer (edemand)
+    runs-on: ubuntu-latest
+    container: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run test:pact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacts
+          path: pacts/
+          if-no-files-found: error
+
+  provider-payments:
+    name: provider (payments)
+    needs: consumer
+    runs-on: ubuntu-latest
+    container: node:20-bookworm
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pay_test
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/pay_test
+      PACT_DIR: ${{ github.workspace }}/pacts
+    defaults:
+      run:
+        working-directory: services/payments
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacts
+          path: pacts
+      - run: npm ci
+      - run: npm run test:pact
+
+  provider-notifications:
+    name: provider (notifications)
+    needs: consumer
+    runs-on: ubuntu-latest
+    container: node:20-bookworm
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: notif_test
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/notif_test
+      PACT_DIR: ${{ github.workspace }}/pacts
+    defaults:
+      run:
+        working-directory: services/notifications
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacts
+          path: pacts
+      - run: npm ci
+      - run: npm run test:pact

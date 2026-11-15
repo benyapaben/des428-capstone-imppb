@@ -5,8 +5,8 @@ import { getSession } from "#lib/http/session.js";
 import * as providers from "#lib/modules/providers/service.js";
 import * as catalog from "#lib/modules/catalog/service.js";
 import * as booking from "#lib/modules/booking/service.js";
-import { config } from "#lib/config.js";
-import { fetchUpstream } from "#lib/http/upstream.js";
+import { upstreamContext } from "#lib/http/upstream.js";
+import { getWallet } from "#lib/clients/payments.js";
 import { money, Badge } from "../../../_ui/format.js";
 
 export default async function ProviderDashboard() {
@@ -16,7 +16,7 @@ export default async function ProviderDashboard() {
   const profile = providers.getOwnProfile(session.sub);
   const services = catalog.listOwnServices(session.sub);
   // Wallet comes from the payments service; the rest is still in-process.
-  const walletRes = await fetchUpstream(`${config.paymentsUrl}/api/provider/wallet`);
+  const walletRes = await getWallet(upstreamContext());
   const wallet = walletRes.ok ? walletRes.data : null;
   const { items } = booking.listBookings({ sub: session.sub, role: "provider" }, { page: 1, size: 100 });
 

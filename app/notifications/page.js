@@ -1,40 +1,21 @@
 export const dynamic = "force-dynamic";
 
 import { redirect } from "next/navigation";
-import { cookies, headers } from "next/headers";
 import { getSession } from "#lib/http/session.js";
-import { config } from "#lib/config.js";
-import { withTraceHeaders } from "#lib/http/trace.js";
+import { upstreamContext } from "#lib/http/upstream.js";
+import { listNotifications } from "#lib/clients/notifications.js";
 import { ActionButton } from "../_ui/client.js";
 
-// Notifications live in their own service now. This page reads them over HTTP: the browser's
-// httpOnly edemand_token cookie is forwarded as a Bearer token, X-Request-Id / traceparent are
-// propagated, and cache: 'no-store' stops Next from caching one user's inbox for another.
-async function loadNotifications() {
-  const token = cookies().get("edemand_token")?.value;
-  const incoming = headers();
-  const h = { accept: "application/json" };
-  if (token) h.authorization = `Bearer ${token}`;
-  if (incoming.get("x-request-id")) h["x-request-id"] = incoming.get("x-request-id");
-  withTraceHeaders(h, { fallback: incoming.get("traceparent") });   // E3: this page's span
-
-  try {
-    const res = await fetch(`${config.notificationsUrl}/api/notifications`, {
-      headers: h,
-      cache: "no-store",
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return { ok: false, list: [] };
-    return { ok: true, list: await res.json() };
-  } catch {
-    return { ok: false, list: [] };
-  }
-}
-
+// Notifications live in their own service now. This page reads them over HTTP through
+// lib/clients/notifications.js: the browser's httpOnly edemand_token cookie is forwarded as a Bearer
+// token, X-Request-Id / traceparent are propagated, and cache: 'no-store' stops Next from caching one
+// user's inbox for another.
 export default async function NotificationsPage() {
   const session = await getSession();
   if (!session) redirect("/login");
-  const { ok, list } = await loadNotifications();
+  const res = await listNotifications(upstreamContext());
+  const ok = res.ok;
+  const list = ok ? res.data : [];
 
   return (
     <div>

@@ -207,7 +207,7 @@ runtime only), which starts the NodeSDK with **no** auto-instrumentations: once 
 registered, Next 14 itself makes the SERVER span per request (continuing an incoming `traceparent`),
 the route-handler / render spans and a span per `fetch()`. Next does **not** put `traceparent` on
 outgoing requests, so every call to a service goes through `withTraceHeaders()`
-(`lib/http/trace.js`): `createIntent`, `fetchUpstream()` and `app/notifications/page.js`. Without an
+(`lib/http/trace.js`): `createIntent` and `getUpstreamJson()` (`lib/clients/upstream.js`). Without an
 SDK (tests, `OTEL_SDK_DISABLED=true`) it writes nothing and the incoming `traceparent` is forwarded
 as before. `createIntent` opens one CLIENT span per attempt (`POST /intents`, `edemand.attempt`,
 ERROR status on a failed attempt), so Step 5 retries show up as sibling spans in Jaeger. A sampler
@@ -267,6 +267,26 @@ dashboard is `deploy/observability/grafana/dashboards/red.json` (uid `edemand-re
 `test/metrics.test.js`, `services/*/test/metrics.test.js`; `call()` takes a `path` option for code that
 reads the pathname.
 
+**Contract tests — Pact (Step 6 / E7).** Consumer-driven contracts edemand → payments and edemand →
+notifications, no Pact Broker. **Consumer** (repo root): `npm run test:pact` runs
+`test/contracts/*.pact.test.js` — the real `lib/clients/` functions against a Pact mock server on fixed
+ports (4802 payments, 4801 notifications; `test/contracts/env.js` must be imported first because config
+reads the URLs at import) — and writes `pacts/edemand-{payments,notifications}.json` (git-ignored; each
+file is deleted and rewritten per run, since Pact merges into an existing file). A response lists only
+the fields the monolith reads. Tokens in a contract are placeholders `Bearer <role>-<id>`. **Providers**:
+`npm run test:pact` in `services/<name>` (needs `DATABASE_URL`, reads `PACT_DIR`, default `<repo>/pacts`)
+replays the pact against `createApp()` on a real Postgres; `requestFilter` swaps the placeholder for
+`tokenFor(role, id)` and sets the service's internal token; state handlers set the state up through the
+service's own endpoints where possible (`/internal/events`, `POST /intents`). Pact only logs a state
+handler that throws and verifies anyway, so the verify tests collect those errors and fail on them.
+Provider state names are part of the contract — rename one on both sides. These tests open sockets and
+are **not** in `npm test`. CI: `.github/workflows/contracts.yml` (consumer job → `pacts` artifact → one
+job per provider with a Postgres service), every job in `container: node:20-bookworm`. Locally:
+**`docker compose down` first** (STEPS 6.5: memory), then
+`act pull_request -W .github/workflows/contracts.yml -P ubuntu-latest=node:20-bookworm --artifact-server-path /tmp/act-artifacts`.
+**Pact is pinned to 16.5.0** (devDependency in all three packages, pact-core 19.2.0): 17.x requires
+Node ≥ 22, like the OpenTelemetry pin below.
+
 **OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
 1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0 — in the
 monolith and both services. From SDK 0.300 on they require Node ≥ 22.15 — do not bump them without
@@ -325,11 +345,14 @@ Seed logins (all share `SEED_PASSWORD` = `eDemand-2026!`, exported from `lib/db/
   tables from your own repository — go through the owning context's repository/service. That
   ownership *is* the extraction seam; violating it destroys the point of the codebase.
 - Data owned by an **extracted service is reached only over HTTP**, never by SQL:
-  - sync calls from the monolith go through a client in `lib/clients/` (today only
-    `lib/clients/payments.js#createIntent`), with the shared `INTERNAL_TOKEN`;
-  - Server Component pages that show service-owned data use `fetchUpstream()`
-    (`lib/http/upstream.js`), which forwards the `edemand_token` cookie as `Bearer`, propagates
-    `X-Request-Id` / `traceparent`, and uses `cache: 'no-store'`;
+  - **every** call from the monolith to a service is a function in `lib/clients/` — that is what the
+    Pact contracts (Step 6 / E7) exercise: `payments.js#createIntent` (sync, shared `INTERNAL_TOKEN`),
+    `payments.js#getWallet` and `notifications.js#listNotifications` (as the user);
+  - Server Component pages that show service-owned data call those clients with
+    `upstreamContext()` (`lib/http/upstream.js`: the `edemand_token` cookie as `Bearer`,
+    `X-Request-Id`, `traceparent`); they go through `getUpstreamJson()` (`lib/clients/upstream.js`,
+    `cache: 'no-store'`, never throws: `{ ok, status, data }`). A new call to a service gets a client
+    function **and** a Pact interaction, not an inline `fetch` in a page;
   - the monolith keeps a **local copy** where it needs one (e.g. `orders.gateway_ref`,
     `orders.payment_status`) instead of reading Payments' tables.
 
@@ -373,7 +396,7 @@ export const POST = handle(async (req, { params }) => {
 Pages are **Server Components that call the service layer directly, in-process** (the honest
 monolith read path) — e.g. `app/(customer)/services/[id]/page.js` imports
 `#lib/modules/catalog/service.js`. Exceptions since Step 2: `/notifications`, `/provider/wallet`
-and `/provider/dashboard` read from the extracted services via `fetchUpstream()`. Route groups
+and `/provider/dashboard` read from the extracted services via `lib/clients/` + `upstreamContext()`. Route groups
 `(customer)` / `(provider)` / `(admin)` carry the three personas. Server-side identity comes from
 **`await getSession()`** (`lib/http/session.js`, async since Step 3 — so a page that uses it is an
 `async` Server Component), which verifies the httpOnly `edemand_token` cookie via `next/headers`;
@@ -675,6 +698,6 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
 - **Migration work in scope** (per `docs/STEPS.md`): Step 2 extraction + nginx gateway, Step 3
   (Keycloak, per-service JWT verification, ownership, BOLA), Step 4 (outbox, RabbitMQ, idempotent
   consumers, DLQ, saga) and Step 5 (timeouts, retries, fault switches, the race demo) are done; the
-  team still adds observability — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
+  team adds observability and contract tests — OpenTelemetry, Prometheus/Grafana, Pact (Step 6). These are **in scope** — don't refuse or
   second-guess them; follow `docs/STEPS.md` for each step's requirements and "done when" criteria.
 - Still out of scope: real payment gateways, chat, cart, subscriptions, SOAP/WSDL.
