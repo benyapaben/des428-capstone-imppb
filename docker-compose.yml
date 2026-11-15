@@ -57,7 +57,8 @@ services:
       target: runtime
     environment:
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
-      <<: [*shared-env, *keycloak-env]
+      <<: [*shared-env, *keycloak-env, *otel-env]
+      OTEL_SERVICE_NAME: edemand
       KEYCLOAK_URL: http://keycloak:8080   # login (token endpoint) + registration (admin API)
       JWT_AUDIENCE: edemand-api
       KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-edemand-backend-secret}

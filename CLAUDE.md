@@ -203,10 +203,24 @@ once-a-second outbox poll does not create a trace per tick. Tests import `src/ap
 never load `otel.js`. amqplib is deliberately **not** auto-instrumented: trace context crosses
 RabbitMQ through the outbox and message headers (E4).
 
+**Tracing in the monolith (Step 6 / E3).** `instrumentation.js` imports `lib/otel.js` first (nodejs
+runtime only), which starts the NodeSDK with **no** auto-instrumentations: once a tracer is
+registered, Next 14 itself makes the SERVER span per request (continuing an incoming `traceparent`),
+the route-handler / render spans and a span per `fetch()`. Next does **not** put `traceparent` on
+outgoing requests, so every call to a service goes through `withTraceHeaders()`
+(`lib/http/trace.js`): `createIntent`, `fetchUpstream()` and `app/notifications/page.js`. Without an
+SDK (tests, `OTEL_SDK_DISABLED=true`) it writes nothing and the incoming `traceparent` is forwarded
+as before. `createIntent` opens one CLIENT span per attempt (`POST /intents`, `edemand.attempt`,
+ERROR status on a failed attempt), so Step 5 retries show up as sibling spans in Jaeger. A sampler
+in `lib/otel.js` drops `/api/health`, `/api/metrics`, `/_next/*` and `favicon.ico`. better-sqlite3
+has no instrumentation, so SQLite work is inside the route span, not its own. The three
+`@opentelemetry/*` root deps must stay in `serverComponentsExternalPackages` (`next.config.js`):
+bundled, they break, and Next's tracer must share the one `@opentelemetry/api` in `node_modules`.
+
 **OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
-1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0. From
-SDK 0.300 on they require Node ≥ 22.15 — do not bump them without moving every Dockerfile and
-`.nvmrc` to Node 22.
+1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0 — in the
+monolith and both services. From SDK 0.300 on they require Node ≥ 22.15 — do not bump them without
+moving every Dockerfile and `.nvmrc` to Node 22.
 
 **Always pass `--build`.** There is no source bind-mount (only `gateway/nginx.conf` is mounted):
 each Dockerfile `COPY`s the source into the image at build time. Without `--build`, an existing image

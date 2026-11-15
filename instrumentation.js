@@ -3,6 +3,8 @@
 // boot, and the outbox relay delivering domain events to the extracted services in the background.
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Step 6 (E3): register the OpenTelemetry tracer first, before any request can arrive.
+    await import("./lib/otel.js");
     const { bootstrapDb } = await import("./lib/db/bootstrap.js");
     bootstrapDb();
     const { startRelay } = await import("./lib/outbox/relay.js");

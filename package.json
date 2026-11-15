@@ -17,6 +17,9 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.223.2",
+    "@opentelemetry/sdk-node": "0.223.2",
     "amqplib": "^0.10.4",
     "bcryptjs": "2.4.3",
     "better-sqlite3": "11.10.0",
