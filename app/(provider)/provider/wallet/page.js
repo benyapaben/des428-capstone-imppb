@@ -2,8 +2,8 @@ export const dynamic = "force-dynamic";
 
 import { redirect } from "next/navigation";
 import { getSession } from "#lib/http/session.js";
-import { config } from "#lib/config.js";
-import { fetchUpstream } from "#lib/http/upstream.js";
+import { upstreamContext } from "#lib/http/upstream.js";
+import { getWallet } from "#lib/clients/payments.js";
 import { money } from "../../../_ui/format.js";
 
 const EMPTY_WALLET = { balance_cents: 0, commission_owed_cents: 0, transactions: [] };
@@ -12,7 +12,7 @@ const EMPTY_WALLET = { balance_cents: 0, commission_owed_cents: 0, transactions:
 export default async function WalletPage() {
   const session = await getSession();
   if (!session || session.role !== "provider") redirect("/provider/login");
-  const res = await fetchUpstream(`${config.paymentsUrl}/api/provider/wallet`);
+  const res = await getWallet(upstreamContext());
   const wallet = res.ok ? res.data : EMPTY_WALLET;
 
   return (
