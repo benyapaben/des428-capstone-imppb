@@ -201,7 +201,7 @@ instrumentations. Settings are the standard `OTEL_*` variables from the `x-otel-
 `/health` and `/metrics` are not traced, and pg spans need a parent (`requireParentSpan`) so the
 once-a-second outbox poll does not create a trace per tick. Tests import `src/app.js` directly and
 never load `otel.js`. amqplib is deliberately **not** auto-instrumented: trace context crosses
-RabbitMQ through the outbox and message headers (E4).
+RabbitMQ through the outbox and message headers (E4, below).
 
 **Tracing in the monolith (Step 6 / E3).** `instrumentation.js` imports `lib/otel.js` first (nodejs
 runtime only), which starts the NodeSDK with **no** auto-instrumentations: once a tracer is
@@ -216,6 +216,23 @@ in `lib/otel.js` drops `/api/health`, `/api/metrics`, `/_next/*` and `favicon.ic
 has no instrumentation, so SQLite work is inside the route span, not its own. The three
 `@opentelemetry/*` root deps must stay in `serverComponentsExternalPackages` (`next.config.js`):
 bundled, they break, and Next's tracer must share the one `@opentelemetry/api` in `node_modules`.
+
+**Tracing across RabbitMQ (Step 6 / E4).** One trace runs request → outbox → broker → consumer. The
+outbox row keeps the W3C trace context of the transaction that wrote it: `events.trace_context`
+(TEXT, JSON) via `insertEvent()` in the monolith, `outbox.trace_context` (JSONB) via
+`repository.insertOutbox()` in Payments; NULL outside a trace (e.g. the saga sweeper). Because the
+relay publishes later from a timer, the context must travel with the row. `publish()` in the shared
+`amqp.js` opens a PRODUCER span `publish <type>` as a child of that stored context (a root span when
+it is NULL) and puts its `traceparent` in the AMQP message `headers`. `handleDelivery()` opens one
+CONSUMER span `process <type>` **per in-process attempt** (`edemand.attempt`, ERROR on a throw) as a
+child of the header, and runs the handler inside it, so the handler's SQL spans and any event it writes
+to its own outbox join the same trace (booking.cancelled → refund → `payment.refunded`). This is why
+`instrumentation-amqplib` (suggested in `docs/STEPS.md`) is not used: it would parent the publish on
+the relay's tick, not on the request. The envelope is unchanged — trace context is only in headers.
+Without an SDK no header is written. Tests: `test/tracing.test.js` and
+`services/payments/test/tracing.test.js` start a NodeSDK with an in-memory exporter
+(`resourceDetectors: []`, or `SimpleSpanProcessor` exports late); `fakeBroker` messages carry
+`properties.headers`.
 
 **OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
 1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0 — in the

@@ -62,6 +62,7 @@ CREATE TABLE outbox (
   aggregate_type TEXT NOT NULL,
   aggregate_id INTEGER NOT NULL,
   payload JSONB NOT NULL,
+  trace_context JSONB,  -- E4: W3C trace context of the request/message that wrote it; NULL = no trace
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   published_at TIMESTAMPTZ
 );

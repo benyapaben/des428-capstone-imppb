@@ -36,7 +36,10 @@ export async function runRelayOnce({ publisher, publishTimeoutMs } = {}) {
     for (const row of await repository.listUnpublished(db, 100)) {
       const envelope = toEnvelope(row);
       try {
-        await publish(publisher ?? (await getPublisher()), envelope, { timeoutMs: publishTimeoutMs });
+        await publish(publisher ?? (await getPublisher()), envelope, {
+          timeoutMs: publishTimeoutMs,
+          traceContext: row.trace_context ?? undefined,   // E4: continue the trace that wrote the event
+        });
       } catch (err) {
         logger.warn({ err: err.message, eventId: row.id, type: row.type }, "relay: delivery failed, will retry");
         if (!publisher) dropPublisher(); // a failed or timed-out channel is not reused next tick
