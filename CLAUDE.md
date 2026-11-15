@@ -184,8 +184,7 @@ extracted routes don't exist there). Compose services: `gateway`, `edemand`, `no
 
 Observability (Step 6, configs in `deploy/observability/`): `jaeger` (UI :16686; apps send OTLP/HTTP to
 `http://jaeger:4318`, no OTel Collector), `prometheus` (:9090, scrapes `edemand:3000/api/metrics`,
-`payments:4002/metrics`, `notifications:4001/metrics` — those targets stay DOWN until the apps expose
-`/metrics`), `grafana` (:3001, admin / admin, anonymous Viewer; Prometheus + Jaeger datasources are
+`payments:4002/metrics`, `notifications:4001/metrics` every 5 s), `grafana` (:3001, admin / admin, anonymous Viewer; Prometheus + Jaeger datasources are
 provisioned with uids `prometheus` / `jaeger`, dashboards load from
 `deploy/observability/grafana/dashboards/*.json`). None of them is a `depends_on` of an app — tracing or
 scraping being down must never fail a request. Grafana logs `plugin xychart is already registered` on
@@ -246,6 +245,27 @@ processes (the monolith writes it in `handle()`), except `/api/health`, `/api/me
 `/metrics`; one `"consumer: processed"` line per handled message. Responses carry **`X-Trace-Id`**
 (open `http://localhost:16686/trace/<id>`) next to `X-Request-Id`. Lines outside a request or message
 (boot, relay ticks) have neither; without an SDK only the explicit `request_id` fields remain.
+
+**Metrics and the RED dashboard (Step 6 / E6).** `prom-client` (15.1.3, all three processes, default
+registry). One histogram gives RED per service: `http_server_request_duration_seconds{method, route,
+status_code}` — rate = `_count`, errors = `status_code=~"5..|aborted"`, duration = buckets. `route` is
+a **pattern, never a raw path**: Express `req.baseUrl + req.route.path` in the services
+(`measureRequests`, `src/metrics.js`, identical in both — keep it that way; no route matched →
+`unmatched`; a reply that never finished, e.g. the Step 5 `drop_replies` fault → `aborted`), and the
+App Router pattern rebuilt from path + params in the monolith (`routeOf()`, `lib/metrics.js`, recorded
+by `handle()` — UI pages and Next's own 404s are not counted). `/health`, `/metrics`, `/api/health`,
+`/api/metrics` are not counted. The consumers record `messaging_process_duration_seconds{queue, type,
+outcome}` once per in-process attempt in the shared `amqp.js` (all three copies). Scrape targets:
+services `GET /metrics` (never routed by the gateway), monolith `GET /api/metrics` (nginx answers 404
+from outside). `prom-client` must stay in `serverComponentsExternalPackages` so the route bundles and
+`instrumentation.js` (the consumer) share one registry; metrics are created with
+`register.getSingleMetric(name) ?? new …` because a module can be evaluated once per Next bundle. The
+dashboard is `deploy/observability/grafana/dashboards/red.json` (uid `edemand-red`,
+`http://localhost:3001/d/edemand-red`, `$service` variable); the Prometheus datasource sets
+`timeInterval: 5s` so `$__rate_interval` matches the 5 s scrape. Grafana provisioning is read-only
+(`allowUiUpdates: false`): edit the JSON in the repo, then `docker compose restart grafana`. Tests:
+`test/metrics.test.js`, `services/*/test/metrics.test.js`; `call()` takes a `path` option for code that
+reads the pathname.
 
 **OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
 1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0 — in the

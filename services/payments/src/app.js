@@ -11,6 +11,7 @@ import * as faults from "./faults.js";
 import { logger } from "./logger.js";
 import { UnauthorizedError, BadRequestError } from "./errors.js";
 import { requestContext, requireAuth, requireInternal, parse, route, notFound, errorHandler } from "./http.js";
+import { measureRequests, metricsHandler } from "./metrics.js";
 
 const id = () => z.coerce.number().int().positive();
 
@@ -54,9 +55,12 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.use(requestContext);
+  app.use(measureRequests);                                   // Step 6 (E6): RED histogram
   app.use(express.json({ limit: "100kb" }));
 
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  // Step 6 (E6): Prometheus scrape target; not routed by the gateway, so only reachable in the network.
+  app.get("/metrics", metricsHandler);
   app.get("/ready", route(async (_req, res) => {
     try {
       await getPool().query("SELECT 1");

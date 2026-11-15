@@ -10,6 +10,8 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    jsonData:
+      timeInterval: 5s          # = the scrape interval: $__rate_interval can be 20 s (default assumes 15 s → 60 s)
 
   - name: Jaeger
     uid: jaeger

@@ -1,5 +1,5 @@
 # Step 6 / Area E (E1): load every dashboard JSON in deploy/observability/grafana/dashboards/
-# (mounted at /var/lib/grafana/dashboards). The RED dashboard itself arrives with E6.
+# (mounted at /var/lib/grafana/dashboards). E6: red.json = "eDemand RED: rate, errors, duration" (uid edemand-red).
 apiVersion: 1
 
 providers:

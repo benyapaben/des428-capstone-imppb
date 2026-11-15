@@ -1,8 +1,9 @@
 # Step 6 / Area E (E1): Prometheus scrapes each process's /metrics directly. No OTel Collector in
 # between: at our size one scrape config is simpler to run and to explain than a collector pipeline.
 #
-# The three app targets do not expose /metrics until E6 lands, so until then they show as DOWN
-# (up == 0) at http://localhost:9090/targets. That is expected, not a broken boot.
+# E6: each app serves prom-client metrics there — http_server_request_duration_seconds (HTTP RED by
+# route pattern) and messaging_process_duration_seconds (RabbitMQ consumers), plus process defaults.
+# The `service` label below is what the Grafana RED dashboard (uid edemand-red) groups by. Targets: localhost:9090/targets.
 global:
   scrape_interval: 5s       # short on purpose: the demo wants a dashboard that moves within seconds
   evaluation_interval: 5s

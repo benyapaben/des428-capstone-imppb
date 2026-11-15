@@ -9,11 +9,14 @@ const nextConfig = {
     // Step 6 (E3): OpenTelemetry stays external too. Its packages load modules dynamically (webpack
     // warns and can break them), and the API must be ONE copy shared with Next's own tracer, which
     // require()s @opentelemetry/api from node_modules.
+    // Step 6 (E6): prom-client too — the route bundles and instrumentation.js (the RabbitMQ consumer)
+    // must share its one default registry, or /api/metrics would miss the consumer's histogram.
     serverComponentsExternalPackages: [
       "better-sqlite3",
       "@opentelemetry/api",
       "@opentelemetry/sdk-node",
       "@opentelemetry/exporter-trace-otlp-http",
+      "prom-client",
     ],
   },
 };

@@ -12,7 +12,12 @@
 // handler's own spans (SQL, the events it writes to its outbox) join the same trace. amqplib is not
 // auto-instrumented: it would hang the publish off the relay's timer tick, not off the request that
 // caused the event. Without an OpenTelemetry SDK (tests) every span is a no-op and no header is sent.
+//
+// Step 6 (E6): every handler attempt is also one observation of messaging_process_duration_seconds
+// {queue, type, outcome="success"|"error"} in prom-client's default registry, which /metrics serves —
+// RED for the event side (rate, failed attempts, handling time), next to the HTTP histogram.
 import amqp from "amqplib";
+import client from "prom-client";
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode, context, propagation, trace } from "@opentelemetry/api";
 import { config } from "./config.js";
 
@@ -49,6 +54,15 @@ export async function assertTopology(ch) {
 }
 
 const tracer = trace.getTracer("edemand-amqp");
+
+// Reused if the registry already has it (in Next.js this module can be evaluated once per bundle).
+const processDuration = client.register.getSingleMetric("messaging_process_duration_seconds") ??
+  new client.Histogram({
+    name: "messaging_process_duration_seconds",
+    help: "RabbitMQ deliveries handled, one per in-process attempt (outcome = success | error)",
+    labelNames: ["queue", "type", "outcome"],
+    buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  });
 
 // The attributes every messaging span carries (OpenTelemetry messaging semantic conventions).
 function messagingAttributes(operation, envelope, destination) {
@@ -212,15 +226,18 @@ async function deliver(ch, msg, handle, log, {
         "edemand.redelivered": Boolean(msg.fields?.redelivered),
       },
     }, parent);
+    const timer = processDuration.startTimer({ queue: queue ?? "unknown", type: envelope.type });
     try {
       await context.with(trace.setSpan(parent, span), async () => {
         await handle(envelope, msg);
         log.info?.({ queue, type: envelope.type, message_id: `${envelope.source}:${envelope.id}`, attempt: attempt + 1 },
           "consumer: processed");                              // inside the span: its span_id
       });
+      timer({ outcome: "success" });
       endSpan(span);
       return settle("ack");
     } catch (err) {
+      timer({ outcome: "error" });
       endSpan(span, err);
       if (attempt >= retries) {
         log.warn?.({ err: err.message, type: envelope.type, attempts: attempt + 1 },
