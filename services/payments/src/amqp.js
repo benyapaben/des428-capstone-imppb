@@ -4,7 +4,21 @@
 // services/notifications/src/amqp.js (only the config import path differs). Change all three
 // together: every process asserts the same topology on connect, and queues whose arguments differ
 // fail with PRECONDITION_FAILED. test/amqp-copies.test.js checks the copies still match.
+//
+// Step 6 (E4): a trace continues across RabbitMQ through the message headers. publish() opens a
+// PRODUCER span ("publish <type>") as a child of the trace context the outbox row stored when the
+// event was written, and puts that span's `traceparent` in the AMQP headers; handleDelivery() opens a
+// CONSUMER span ("process <type>") per attempt as a child of it, and runs the handler inside it — so the
+// handler's own spans (SQL, the events it writes to its outbox) join the same trace. amqplib is not
+// auto-instrumented: it would hang the publish off the relay's timer tick, not off the request that
+// caused the event. Without an OpenTelemetry SDK (tests) every span is a no-op and no header is sent.
+//
+// Step 6 (E6): every handler attempt is also one observation of messaging_process_duration_seconds
+// {queue, type, outcome="success"|"error"} in prom-client's default registry, which /metrics serves —
+// RED for the event side (rate, failed attempts, handling time), next to the HTTP histogram.
 import amqp from "amqplib";
+import client from "prom-client";
+import { ROOT_CONTEXT, SpanKind, SpanStatusCode, context, propagation, trace } from "@opentelemetry/api";
 import { config } from "./config.js";
 
 export const EXCHANGE = "edemand.events";
@@ -37,6 +51,36 @@ export async function assertTopology(ch) {
     });
     for (const key of keys) await ch.bindQueue(queue, EXCHANGE, key);
   }
+}
+
+const tracer = trace.getTracer("edemand-amqp");
+
+// Reused if the registry already has it (in Next.js this module can be evaluated once per bundle).
+const processDuration = client.register.getSingleMetric("messaging_process_duration_seconds") ??
+  new client.Histogram({
+    name: "messaging_process_duration_seconds",
+    help: "RabbitMQ deliveries handled, one per in-process attempt (outcome = success | error)",
+    labelNames: ["queue", "type", "outcome"],
+    buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  });
+
+// The attributes every messaging span carries (OpenTelemetry messaging semantic conventions).
+function messagingAttributes(operation, envelope, destination) {
+  return {
+    "messaging.system": "rabbitmq",
+    "messaging.operation.name": operation,
+    "messaging.destination.name": destination,
+    "messaging.rabbitmq.destination.routing_key": envelope.type,
+    "messaging.message.id": `${envelope.source}:${envelope.id}`,
+  };
+}
+
+function endSpan(span, err) {
+  if (err) {
+    span.recordException(err);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+  }
+  span.end();
 }
 
 const defaultConnect = (url) => amqp.connect(url);
@@ -96,17 +140,38 @@ export function dropPublisher() {
 
 // Resolves only after the broker confirms the message; rejects on a nack, a closed channel, or when no
 // confirm arrives within timeoutMs (e.g. a broker blocked by a memory or disk alarm).
-export function publish(channel, envelope, { timeoutMs = config.publishTimeoutMs } = {}) {
+// `traceContext` is the carrier the outbox stored with the event ({ traceparent, ... }); without one
+// (an event written outside any trace, e.g. by the saga timeout) the publish span starts a new trace.
+export async function publish(channel, envelope, { timeoutMs = config.publishTimeoutMs, traceContext } = {}) {
+  const parent = traceContext ? propagation.extract(ROOT_CONTEXT, traceContext) : context.active();
+  const span = tracer.startSpan(`publish ${envelope.type}`, {
+    kind: SpanKind.PRODUCER,
+    attributes: messagingAttributes("publish", envelope, EXCHANGE),
+  }, parent);
+  const headers = {};
+  propagation.inject(trace.setSpan(parent, span), headers);
+
   const confirmed = new Promise((resolve, reject) => {
     channel.publish(
       EXCHANGE,
       envelope.type,
       Buffer.from(JSON.stringify(envelope)),
-      { persistent: true, contentType: "application/json", messageId: `${envelope.source}:${envelope.id}` },
+      {
+        persistent: true,
+        contentType: "application/json",
+        messageId: `${envelope.source}:${envelope.id}`,
+        ...(Object.keys(headers).length > 0 && { headers }),
+      },
       (err) => (err ? reject(err) : resolve()),
     );
   });
-  return withTimeout(confirmed, timeoutMs, `publish ${envelope.type}`);
+  try {
+    await withTimeout(confirmed, timeoutMs, `publish ${envelope.type}`);
+    endSpan(span);
+  } catch (err) {
+    endSpan(span, err);
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------- consumer
@@ -118,12 +183,22 @@ export function publish(channel, envelope, { timeoutMs = config.publishTimeoutMs
 // back to the broker. ack/nack never throw out of here: if the channel closed meanwhile, the broker
 // redelivers the unacked message on its own and the inbox makes the redelivery a no-op. `isOpen` lets
 // the caller stop the retries once the channel is gone, since the broker is redelivering it anyway.
-export async function handleDelivery(ch, msg, handle, log = console, {
+//
+// Step 6 (E5): the whole delivery runs in the publisher's context from the message headers — its trace
+// and the request_id baggage — so the consumer's own log lines (retries, dead-lettering) and the
+// handler's carry the trace_id and the request_id of the request that caused the event.
+export function handleDelivery(ch, msg, handle, log = console, options = {}) {
+  const parent = propagation.extract(ROOT_CONTEXT, msg.properties?.headers ?? {});
+  return context.with(parent, () => deliver(ch, msg, handle, log, options));
+}
+
+async function deliver(ch, msg, handle, log, {
   retries = config.consumerRetries,
   baseMs = config.consumerRetryBaseMs,
   wait = sleep,
   isOpen = () => true,
-} = {}) {
+  queue,
+}) {
   const settle = (action, ...args) => {
     try {
       ch[action](msg, ...args);
@@ -140,11 +215,30 @@ export async function handleDelivery(ch, msg, handle, log = console, {
     return settle("nack", false, false);                       // retrying cannot fix bad JSON
   }
 
+  // Each attempt is a child of the publisher's span (none in the headers: a new trace per attempt).
+  const parent = context.active();
   for (let attempt = 0; ; attempt++) {
+    const span = tracer.startSpan(`process ${envelope.type}`, {
+      kind: SpanKind.CONSUMER,
+      attributes: {
+        ...messagingAttributes("process", envelope, queue ?? msg.fields?.routingKey),
+        "edemand.attempt": attempt + 1,
+        "edemand.redelivered": Boolean(msg.fields?.redelivered),
+      },
+    }, parent);
+    const timer = processDuration.startTimer({ queue: queue ?? "unknown", type: envelope.type });
     try {
-      await handle(envelope, msg);
+      await context.with(trace.setSpan(parent, span), async () => {
+        await handle(envelope, msg);
+        log.info?.({ queue, type: envelope.type, message_id: `${envelope.source}:${envelope.id}`, attempt: attempt + 1 },
+          "consumer: processed");                              // inside the span: its span_id
+      });
+      timer({ outcome: "success" });
+      endSpan(span);
       return settle("ack");
     } catch (err) {
+      timer({ outcome: "error" });
+      endSpan(span, err);
       if (attempt >= retries) {
         log.warn?.({ err: err.message, type: envelope.type, attempts: attempt + 1 },
           "consumer: handler failed, handing the message back to the broker");
@@ -197,7 +291,7 @@ export async function startConsumer(queue, handle, log = console, {
           if (current === c) closeQuietly(c);
           return;
         }
-        handleDelivery(ch, msg, handle, log, { isOpen: () => current === c, ...delivery })
+        handleDelivery(ch, msg, handle, log, { isOpen: () => current === c, queue, ...delivery })
           .catch((err) => log.error?.({ queue, err: err.message }, "consumer: delivery handling failed"));
       });
       log.info?.({ queue }, "consumer started");

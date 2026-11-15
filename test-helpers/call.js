@@ -2,9 +2,10 @@
 // This is the App Router analogue of Ride's supertest-against-app: no socket, no server, just the
 // exported handler function called with (request, { params }).
 export async function call(handler, opts = {}) {
-  const { params = {}, query = {}, body, token, headers = {}, method, secret } = opts;
+  const { params = {}, query = {}, body, token, headers = {}, method, secret, path = "/" } = opts;
 
-  const url = new URL("http://test.local/");
+  // `path` only matters to code that reads req.url's pathname (logging, the E6 metrics route label).
+  const url = new URL(path, "http://test.local/");
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   }

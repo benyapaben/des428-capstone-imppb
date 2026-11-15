@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { cookies, headers } from "next/headers";
 import { getSession } from "#lib/http/session.js";
 import { config } from "#lib/config.js";
+import { withTraceHeaders } from "#lib/http/trace.js";
 import { ActionButton } from "../_ui/client.js";
 
 // Notifications live in their own service now. This page reads them over HTTP: the browser's
@@ -15,7 +16,7 @@ async function loadNotifications() {
   const h = { accept: "application/json" };
   if (token) h.authorization = `Bearer ${token}`;
   if (incoming.get("x-request-id")) h["x-request-id"] = incoming.get("x-request-id");
-  if (incoming.get("traceparent")) h.traceparent = incoming.get("traceparent");
+  withTraceHeaders(h, { fallback: incoming.get("traceparent") });   // E3: this page's span
 
   try {
     const res = await fetch(`${config.notificationsUrl}/api/notifications`, {

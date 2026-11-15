@@ -30,7 +30,10 @@ export const fakeBroker = {
   channel: {
     publish(exchange, routingKey, content, options, cb) {
       if (fakeBroker.down) { cb(new Error("broker down")); return false; }
-      const msg = { routingKey, messageId: options.messageId, envelope: JSON.parse(content.toString()) };
+      const msg = {
+        routingKey, messageId: options.messageId, envelope: JSON.parse(content.toString()),
+        properties: { messageId: options.messageId, headers: options.headers },   // E4: trace headers
+      };
       fakeBroker.published.push(msg);
       for (const [queue, keys] of Object.entries(QUEUES)) {
         if (keys.includes(routingKey)) fakeBroker.queues.get(queue).push(msg);

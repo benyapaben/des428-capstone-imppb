@@ -6,6 +6,7 @@ import * as service from "./service.js";
 import {
   requestContext, requireAuth, requireInternal, parse, parseId, route, notFound, errorHandler,
 } from "./http.js";
+import { measureRequests, metricsHandler } from "./metrics.js";
 
 const eventSchema = z.object({
   source: z.string().min(1),
@@ -21,10 +22,13 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.use(requestContext);
+  app.use(measureRequests);                                   // Step 6 (E6): RED histogram
   app.use(express.json({ limit: "100kb" }));
 
   // Liveness never touches the database; readiness must reach Postgres.
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  // Step 6 (E6): Prometheus scrape target; not routed by the gateway, so only reachable in the network.
+  app.get("/metrics", metricsHandler);
   app.get("/ready", route(async (_req, res) => {
     try {
       await query("SELECT 1");

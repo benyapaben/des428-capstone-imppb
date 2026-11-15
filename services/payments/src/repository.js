@@ -1,6 +1,7 @@
 // Payments & Wallet owns payment_intents, transactions, provider_wallets, webhook_events, outbox and
 // processed_messages. SQL only. Every function takes `db` (the pool or a transaction client) so the
 // service layer decides what runs inside one transaction.
+import { context, propagation } from "@opentelemetry/api";
 
 // ---- payment_intents ----
 // ON CONFLICT (order_id) DO NOTHING: two racing POST /intents for one order -> exactly one row.
@@ -85,10 +86,15 @@ export async function markWebhookProcessed(db, gatewayEventId) {
 }
 
 // ---- outbox ----
+// Step 6 (E4): the row also keeps the trace it was written in (the webhook request, or the consumer
+// span of the booking event), so the relay's publish continues that trace instead of starting one.
 export async function insertOutbox(db, type, aggregateType, aggregateId, payload) {
+  const carrier = {};
+  propagation.inject(context.active(), carrier);
   await db.query(
-    "INSERT INTO outbox (type, aggregate_type, aggregate_id, payload) VALUES ($1, $2, $3, $4)",
-    [type, aggregateType, aggregateId, JSON.stringify(payload)]
+    "INSERT INTO outbox (type, aggregate_type, aggregate_id, payload, trace_context) VALUES ($1, $2, $3, $4, $5)",
+    [type, aggregateType, aggregateId, JSON.stringify(payload),
+      Object.keys(carrier).length > 0 ? JSON.stringify(carrier) : null]
   );
 }
 export async function listUnpublished(db, limit = 100) {

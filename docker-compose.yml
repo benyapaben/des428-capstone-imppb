@@ -5,6 +5,8 @@ name: edemand
 #   docker compose --profile test run --rm test                 (monolith suite, in-memory, no deps)
 #   docker compose --profile test run --rm notifications-test   (needs test-db)
 #   docker compose --profile test run --rm payments-test        (needs test-db)
+# Step 6 — Area E: Jaeger http://localhost:16686 · Prometheus http://localhost:9090 ·
+#   Grafana http://localhost:3001 (admin / admin)
 
 x-shared-env: &shared-env
   INTERNAL_TOKEN: ${INTERNAL_TOKEN:-edemand-internal-token}
@@ -14,6 +16,16 @@ x-shared-env: &shared-env
 x-keycloak-env: &keycloak-env
   KEYCLOAK_ISSUER: http://localhost:8081/realms/edemand
   JWKS_URL: http://keycloak:8080/realms/edemand/protocol/openid-connect/certs
+
+# Step 6 (E2): standard OpenTelemetry settings, read by the SDK in services/*/src/otel.js. Traces go
+# over OTLP/HTTP straight to Jaeger. Only traces: metrics come from Prometheus scrapes (E6), logs stay
+# on stdout. If Jaeger is down the exporter drops spans quietly; requests are never affected.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: none
+  OTEL_LOGS_EXPORTER: none
+  OTEL_BSP_SCHEDULE_DELAY: "1000"   # flush every 1 s so a demo trace shows up in Jaeger quickly
 
 x-pg-health: &pg-health
   test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -45,7 +57,8 @@ services:
       target: runtime
     environment:
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
-      <<: [*shared-env, *keycloak-env]
+      <<: [*shared-env, *keycloak-env, *otel-env]
+      OTEL_SERVICE_NAME: edemand
       KEYCLOAK_URL: http://keycloak:8080   # login (token endpoint) + registration (admin API)
       JWT_AUDIENCE: edemand-api
       KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-edemand-backend-secret}
@@ -69,7 +82,8 @@ services:
       context: ./services/notifications
       target: runtime
     environment:
-      <<: [*shared-env, *keycloak-env]
+      <<: [*shared-env, *keycloak-env, *otel-env]
+      OTEL_SERVICE_NAME: notifications
       JWT_AUDIENCE: notifications-api
       DATABASE_URL: postgres://postgres:postgres@notif-db:5432/notif_db
       AMQP_URL: amqp://guest:guest@rabbitmq:5672
@@ -83,7 +97,8 @@ services:
       context: ./services/payments
       target: runtime
     environment:
-      <<: [*shared-env, *keycloak-env]
+      <<: [*shared-env, *keycloak-env, *otel-env]
+      OTEL_SERVICE_NAME: payments
       JWT_AUDIENCE: payments-api
       DATABASE_URL: postgres://postgres:postgres@pay-db:5432/pay_db
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-edemand-webhook-secret}
@@ -148,6 +163,67 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 12
+
+  # ---------------- Step 6 — Area E: observability ----------------
+  # Apps send traces over OTLP/HTTP straight to Jaeger (http://jaeger:4318) — no OTel Collector at
+  # our size. Prometheus scrapes each app's /metrics; Grafana reads both. Configs: deploy/observability/.
+  # Nothing here is a dependency of the apps: a missing tracer or scraper must never stop a request.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      MEMORY_MAX_TRACES: "5000"     # in-memory storage, capped so it cannot eat the 8 GB budget
+    ports:
+      - "16686:16686"               # UI: http://localhost:16686 (4318 OTLP stays inside the network)
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:14269/"]   # admin port: 200 when serving
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1d
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"                 # UI + targets: http://localhost:9090/targets
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"     # the marker can open the dashboard without logging in
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"   # offline: no calls home
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"    # 11.x otherwise tries to download plugins on boot
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"                 # http://localhost:3001 (admin / admin); :3000 is the monolith
+    depends_on:
+      prometheus: { condition: service_healthy }
+      jaeger: { condition: service_healthy }
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 6
 
   # ---------------- tests ----------------
   # Boots its own in-memory database and fakes the two services (test-helpers/fakeServices.js).

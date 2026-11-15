@@ -88,6 +88,8 @@ paths:
     get: { tags: [Ops], security: [], summary: Liveness, responses: { '200': { description: ok } } }
   /api/ready:
     get: { tags: [Ops], security: [], summary: Readiness (SELECT 1), responses: { '200': { description: ok }, '503': { description: db unavailable } } }
+  /api/metrics:
+    get: { tags: [Ops], security: [], summary: 'Prometheus scrape target (text format, Step 6 / E6). Inside the compose network only: the gateway answers 404', responses: { '200': { description: 'Prometheus text exposition format', content: { text/plain: { schema: { type: string } } } } } }
 
   /api/auth/customer/register:
     post:

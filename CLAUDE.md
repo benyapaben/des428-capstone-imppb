@@ -182,6 +182,96 @@ extracted routes don't exist there). Compose services: `gateway`, `edemand`, `no
 `payments`, `notif-db`, `pay-db`, `keycloak` (:8081), `rabbitmq` (:5672, UI :15672), plus the `test` profile (`test`, `test-db`,
 `notifications-test`, `payments-test`). `deploy/test-db-init.sql` creates `notif_test` / `pay_test`.
 
+Observability (Step 6, configs in `deploy/observability/`): `jaeger` (UI :16686; apps send OTLP/HTTP to
+`http://jaeger:4318`, no OTel Collector), `prometheus` (:9090, scrapes `edemand:3000/api/metrics`,
+`payments:4002/metrics`, `notifications:4001/metrics` every 5 s), `grafana` (:3001, admin / admin, anonymous Viewer; Prometheus + Jaeger datasources are
+provisioned with uids `prometheus` / `jaeger`, dashboards load from
+`deploy/observability/grafana/dashboards/*.json`). None of them is a `depends_on` of an app — tracing or
+scraping being down must never fail a request. Grafana logs `plugin xychart is already registered` on
+boot: a harmless Grafana 11.3 bug. Its Jaeger datasource "health" API says *Plugin unavailable* because
+that datasource runs in the browser; use Explore, or `/api/datasources/proxy/uid/jaeger/api/services`.
+
+**Tracing in the services (Step 6 / E2).** Both services start with
+`node --import ./src/otel.js src/server.js` (Dockerfile `CMD` and `npm start`). `src/otel.js` — identical
+in both services, keep it that way — registers OpenTelemetry's ESM loader hook (our code *imports*
+express/pg, which a require-hook never sees) and starts the NodeSDK with the http, express and pg
+instrumentations. Settings are the standard `OTEL_*` variables from the `x-otel-env` block in
+`docker-compose.yml` (plus `OTEL_SERVICE_NAME` per service); `OTEL_SDK_DISABLED=true` turns it off.
+`/health` and `/metrics` are not traced, and pg spans need a parent (`requireParentSpan`) so the
+once-a-second outbox poll does not create a trace per tick. Tests import `src/app.js` directly and
+never load `otel.js`. amqplib is deliberately **not** auto-instrumented: trace context crosses
+RabbitMQ through the outbox and message headers (E4, below).
+
+**Tracing in the monolith (Step 6 / E3).** `instrumentation.js` imports `lib/otel.js` first (nodejs
+runtime only), which starts the NodeSDK with **no** auto-instrumentations: once a tracer is
+registered, Next 14 itself makes the SERVER span per request (continuing an incoming `traceparent`),
+the route-handler / render spans and a span per `fetch()`. Next does **not** put `traceparent` on
+outgoing requests, so every call to a service goes through `withTraceHeaders()`
+(`lib/http/trace.js`): `createIntent`, `fetchUpstream()` and `app/notifications/page.js`. Without an
+SDK (tests, `OTEL_SDK_DISABLED=true`) it writes nothing and the incoming `traceparent` is forwarded
+as before. `createIntent` opens one CLIENT span per attempt (`POST /intents`, `edemand.attempt`,
+ERROR status on a failed attempt), so Step 5 retries show up as sibling spans in Jaeger. A sampler
+in `lib/otel.js` drops `/api/health`, `/api/metrics`, `/_next/*` and `favicon.ico`. better-sqlite3
+has no instrumentation, so SQLite work is inside the route span, not its own. The three
+`@opentelemetry/*` root deps must stay in `serverComponentsExternalPackages` (`next.config.js`):
+bundled, they break, and Next's tracer must share the one `@opentelemetry/api` in `node_modules`.
+
+**Tracing across RabbitMQ (Step 6 / E4).** One trace runs request → outbox → broker → consumer. The
+outbox row keeps the W3C trace context of the transaction that wrote it: `events.trace_context`
+(TEXT, JSON) via `insertEvent()` in the monolith, `outbox.trace_context` (JSONB) via
+`repository.insertOutbox()` in Payments; NULL outside a trace (e.g. the saga sweeper). Because the
+relay publishes later from a timer, the context must travel with the row. `publish()` in the shared
+`amqp.js` opens a PRODUCER span `publish <type>` as a child of that stored context (a root span when
+it is NULL) and puts its `traceparent` in the AMQP message `headers`. `handleDelivery()` opens one
+CONSUMER span `process <type>` **per in-process attempt** (`edemand.attempt`, ERROR on a throw) as a
+child of the header, and runs the handler inside it, so the handler's SQL spans and any event it writes
+to its own outbox join the same trace (booking.cancelled → refund → `payment.refunded`). This is why
+`instrumentation-amqplib` (suggested in `docs/STEPS.md`) is not used: it would parent the publish on
+the relay's tick, not on the request. The envelope is unchanged — trace context is only in headers.
+Without an SDK no header is written. Tests: `test/tracing.test.js` and
+`services/payments/test/tracing.test.js` start a NodeSDK with an in-memory exporter
+(`resourceDetectors: []`, or `SimpleSpanProcessor` exports late); `fakeBroker` messages carry
+`properties.headers`.
+
+**Log correlation (Step 6 / E5).** Every pino logger (`lib/logger.js`, `services/*/src/logger.js` —
+same `correlation()` / `withRequestId()` logic in all three, the two service files identical) has a
+`mixin` that adds `request_id`, `trace_id` and `span_id` from the active OpenTelemetry context; a
+field the call passes itself wins. `request_id` is **W3C baggage**: `handle()` (monolith) and
+`requestContext` (services) run the request inside `withRequestId()`, so it is injected with the trace
+context into outgoing calls, the outbox `trace_context` column and the AMQP headers, and a consumer's
+lines show the id of the request that caused the event. Log fields are snake_case (`request_id`); the
+error **body** keeps `requestId` (API contract). One `"request"` line per HTTP request in all three
+processes (the monolith writes it in `handle()`), except `/api/health`, `/api/metrics`, `/health`,
+`/metrics`; one `"consumer: processed"` line per handled message. Responses carry **`X-Trace-Id`**
+(open `http://localhost:16686/trace/<id>`) next to `X-Request-Id`. Lines outside a request or message
+(boot, relay ticks) have neither; without an SDK only the explicit `request_id` fields remain.
+
+**Metrics and the RED dashboard (Step 6 / E6).** `prom-client` (15.1.3, all three processes, default
+registry). One histogram gives RED per service: `http_server_request_duration_seconds{method, route,
+status_code}` — rate = `_count`, errors = `status_code=~"5..|aborted"`, duration = buckets. `route` is
+a **pattern, never a raw path**: Express `req.baseUrl + req.route.path` in the services
+(`measureRequests`, `src/metrics.js`, identical in both — keep it that way; no route matched →
+`unmatched`; a reply that never finished, e.g. the Step 5 `drop_replies` fault → `aborted`), and the
+App Router pattern rebuilt from path + params in the monolith (`routeOf()`, `lib/metrics.js`, recorded
+by `handle()` — UI pages and Next's own 404s are not counted). `/health`, `/metrics`, `/api/health`,
+`/api/metrics` are not counted. The consumers record `messaging_process_duration_seconds{queue, type,
+outcome}` once per in-process attempt in the shared `amqp.js` (all three copies). Scrape targets:
+services `GET /metrics` (never routed by the gateway), monolith `GET /api/metrics` (nginx answers 404
+from outside). `prom-client` must stay in `serverComponentsExternalPackages` so the route bundles and
+`instrumentation.js` (the consumer) share one registry; metrics are created with
+`register.getSingleMetric(name) ?? new …` because a module can be evaluated once per Next bundle. The
+dashboard is `deploy/observability/grafana/dashboards/red.json` (uid `edemand-red`,
+`http://localhost:3001/d/edemand-red`, `$service` variable); the Prometheus datasource sets
+`timeInterval: 5s` so `$__rate_interval` matches the 5 s scrape. Grafana provisioning is read-only
+(`allowUiUpdates: false`): edit the JSON in the repo, then `docker compose restart grafana`. Tests:
+`test/metrics.test.js`, `services/*/test/metrics.test.js`; `call()` takes a `path` option for code that
+reads the pathname.
+
+**OpenTelemetry versions are pinned to the last line that supports Node 20**: `@opentelemetry/api`
+1.9.1, SDK packages 0.223.2, `instrumentation-express` 0.71.0, `instrumentation-pg` 0.76.0 — in the
+monolith and both services. From SDK 0.300 on they require Node ≥ 22.15 — do not bump them without
+moving every Dockerfile and `.nvmrc` to Node 22.
+
 **Always pass `--build`.** There is no source bind-mount (only `gateway/nginx.conf` is mounted):
 each Dockerfile `COPY`s the source into the image at build time. Without `--build`, an existing image
 is reused and the container silently runs the **pre-edit code**. `edemand` is a production
@@ -558,6 +648,11 @@ mounting the Express app from `createApp()` (`src/app.js`, no `listen`) on an ep
 - The product name changed (eDemand → Bangkok Homeservice) **only** course-facing. Identifiers, the
   DB file (`data/edemand.db`), the cookie (`edemand_token`), and the package names still say
   `edemand` — leave them alone.
+- **Gateway 502 after rebuilding a service.** nginx resolves `edemand` / `payments` / `notifications`
+  to container IPs once, at its own start. `docker compose up -d --build payments` recreates the
+  container with a new IP and the gateway keeps proxying to the old one (`connect() failed (111:
+  Connection refused)` in its log → 502). Fix: `docker compose restart gateway` after recreating any
+  upstream (or bring the whole stack down and up).
 - **Do not run `npm audit fix --force`.** `npm audit` reports advisories (critical `next`; high
   `nanoid`/`postcss`/`source-map-js`/`zod`; moderate `uuid`). The deps are pinned on purpose as the
   course baseline, and `--force` would bump `next`, `zod`, `postcss` and `uuid` across majors — zod 4

@@ -1,0 +1,32 @@
+# Step 6 / Area E (E1): Prometheus scrapes each process's /metrics directly. No OTel Collector in
+# between: at our size one scrape config is simpler to run and to explain than a collector pipeline.
+#
+# E6: each app serves prom-client metrics there — http_server_request_duration_seconds (HTTP RED by
+# route pattern) and messaging_process_duration_seconds (RabbitMQ consumers), plus process defaults.
+# The `service` label below is what the Grafana RED dashboard (uid edemand-red) groups by. Targets: localhost:9090/targets.
+global:
+  scrape_interval: 5s       # short on purpose: the demo wants a dashboard that moves within seconds
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: edemand
+    metrics_path: /api/metrics
+    static_configs:
+      - targets: ["edemand:3000"]
+        labels: { service: edemand }
+
+  - job_name: payments
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["payments:4002"]
+        labels: { service: payments }
+
+  - job_name: notifications
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["notifications:4001"]
+        labels: { service: notifications }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
